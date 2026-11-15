@@ -1,0 +1,6 @@
+# Reviewed false positives that remain in this branch's history (commit 66f7ff0).
+# Both values were replaced in a later commit; neither is a credential:
+# - release.yml: the RFC 6455 sample Sec-WebSocket-Key nonce "dGhlIHNhbXBsZSBub25jZQ=="
+# - cheese_demo.test.ts: a fake per-run demo token used as a unit-test fixture
+66f7ff04fe731e09bd5f93495178eb25d957e835:.github/workflows/release.yml:generic-api-key:177
+66f7ff04fe731e09bd5f93495178eb25d957e835:typescript/examples/cheese_demo.test.ts:generic-api-key:194

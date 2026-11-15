@@ -1,0 +1,20 @@
+node_modules/
+__pycache__/
+*.egg-info/
+dist/
+.venv/
+*.pyc
+.pytest_cache/
+# Staged by `npm run build` from ../python/src/sense/examples/assets/ — the
+# single committed copy of the sample wav lives in the Python package tree.
+typescript/examples/assets/
+
+# Local credentials; templates may be committed with placeholder values only.
+.env
+.env.*
+!.env.example
+!.env.template
+*.key
+*.pem
+*.p12
+*.pfx

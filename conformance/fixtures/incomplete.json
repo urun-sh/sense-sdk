@@ -1,0 +1,9 @@
+{
+  "note": "A wave missing a registered question is a protocol error. Runners must raise or emit an error, never treat the missing answer as false/hold.",
+  "questions_ref": "questions.json",
+  "waves": [
+    {"wave_id": 0, "t_ms": 0, "results": {"finished": {"kind": "noul", "choice": true, "probabilities": {"true": 0.9, "false": 0.1}, "confidence": 0.9}, "user_speaking": {"kind": "noul", "choice": false, "probabilities": {"true": 0.1, "false": 0.9}, "confidence": 0.9}, "intent": {"kind": "choice", "choice": "support", "probabilities": {"support": 0.8, "sales": 0.1, "other": 0.1}, "confidence": 0.8}, "actions": {"kind": "choice", "choice": "respond", "probabilities": {"respond": 0.7, "ignore": 0.2, "wait": 0.1}, "confidence": 0.7}, "urgency": {"kind": "score", "probabilities": {"0": 0.3, "1": 0.5, "2": 0.2}, "confidence": 0.6}}},
+    {"wave_id": 1, "t_ms": 40, "results": {"finished": {"kind": "noul", "choice": true, "probabilities": {"true": 0.85, "false": 0.15}, "confidence": 0.85}, "user_speaking": {"kind": "noul", "choice": false, "probabilities": {"true": 0.2, "false": 0.8}, "confidence": 0.8}, "actions": {"kind": "choice", "choice": "respond", "probabilities": {"respond": 0.6, "ignore": 0.2, "wait": 0.2}, "confidence": 0.6}, "urgency": {"kind": "score", "probabilities": {"0": 0.3, "1": 0.5, "2": 0.2}, "confidence": 0.6}}}
+  ],
+  "error_on_wave_id": 1
+}

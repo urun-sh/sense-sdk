@@ -1,0 +1,961 @@
+"""Offline tests for the sense SDK, plus a fake-lane wire e2e over aiohttp."""
+
+import asyncio
+import json
+
+import pytest
+from aiohttp import WSMsgType, web
+from sense import (
+    Context,
+    OutOfCreditsError,
+    Predicate,
+    ProtocolError,
+    Question,
+    QuestionKind,
+    Score,
+    Sense,
+    Session,
+    Wave,
+    session_event,
+)
+
+
+def questions():
+    return [
+        Question(id="finished", kind=QuestionKind.NOUL, prompt="finished?"),
+        Question(
+            id="intent",
+            kind=QuestionKind.CHOICE,
+            prompt="want?",
+            options=["support", "sales", "other"],
+        ),
+        Question(
+            id="urgency",
+            kind=QuestionKind.SCORE,
+            prompt="urgent?",
+            levels=["low", "medium", "high"],
+        ),
+    ]
+
+
+def payload(wave_id, t_ms, **overrides):
+    results = {
+        "finished": {
+            "kind": "noul",
+            "choice": "true",
+            "probabilities": {"true": 0.9, "false": 0.1},
+            "confidence": 0.9,
+        },
+        "intent": {
+            "kind": "choice",
+            "choice": "support",
+            "probabilities": {"support": 0.7, "sales": 0.1, "other": 0.2},
+            "confidence": 0.7,
+        },
+        "urgency": {
+            "kind": "score",
+            "probabilities": {"0": 0.1, "1": 0.4, "2": 0.5},
+            "confidence": 0.8,
+        },
+    }
+    results.update(overrides)
+    return {"wave_id": wave_id, "t_ms": t_ms, "results": results}
+
+
+# ---------------------------------------------------------------------------
+# decoding
+# ---------------------------------------------------------------------------
+
+
+def test_noul_normalizes_string_and_bool_choices():
+    w = Wave.decode(questions(), payload(0, 0))
+    assert w.result("finished").value is True
+    assert w.result("finished").p == 0.9
+    p2 = payload(1, 40)
+    p2["results"]["finished"] = {
+        "kind": "noul",
+        "choice": False,
+        "probabilities": {"true": 0.2, "false": 0.8},
+        "confidence": 0.5,
+    }
+    w2 = Wave.decode(questions(), p2)
+    assert w2.result("finished").value is False
+
+
+def test_noul_bogus_choice_is_protocol_error():
+    bad = payload(0, 0)
+    bad["results"]["finished"] = {
+        "kind": "noul",
+        "choice": None,
+        "probabilities": {},
+        "confidence": None,
+    }
+    with pytest.raises(ProtocolError):
+        Wave.decode(questions(), bad)
+
+
+def test_score_semantics():
+    w = Wave.decode(questions(), payload(3, 120))
+    u = w.result("urgency")
+    assert isinstance(u, Score)
+    assert u.value == pytest.approx(0.4 + 2 * 0.5)  # expected ordinal
+    assert u.top == u.level == "high"
+    assert u.p_at_least("medium") == pytest.approx(0.9)  # p1 + p2
+    assert u.p_at_least("high") == pytest.approx(0.5)
+    assert u.p_at_least("low") == pytest.approx(1.0)
+    with pytest.raises(ProtocolError):
+        u.p_at_least("nope")
+
+
+def test_missing_and_unknown_raise():
+    p = payload(0, 0)
+    del p["results"]["intent"]
+    with pytest.raises(ProtocolError):
+        Wave.decode(questions(), p)
+    p2 = payload(0, 0)
+    p2["results"]["bogus"] = {"kind": "noul", "choice": True}
+    with pytest.raises(ProtocolError):
+        Wave.decode(questions(), p2)
+
+
+def test_result_lookup_unknown_qid():
+    w = Wave.decode(questions(), payload(0, 0))
+    with pytest.raises(ProtocolError):
+        w.result("nope")
+
+
+# ---------------------------------------------------------------------------
+# predicates
+# ---------------------------------------------------------------------------
+
+
+def wave_list():
+    return [
+        Wave.decode(questions(), payload(i, i * 40, **alt))
+        for i, alt in enumerate([{}, {}, {}, {}])
+    ]
+
+
+def test_question_sugar_builds_predicates():
+    finished, intent = questions()[:2]
+    ws = wave_list()
+    pred = finished & (intent == "support")
+    assert all(pred(w) for w in ws)
+    assert not any((~finished)(w) for w in ws)
+    assert all((finished.p >= 0.8)(w) for w in ws)
+    assert all((intent.p("support") >= 0.7)(w) for w in ws)
+    assert not any((intent != "support")(w) for w in ws)
+
+
+def test_score_predicate_subjects():
+    urgency = questions()[2]
+    w = Wave.decode(questions(), payload(0, 0))
+    assert (urgency.value >= 1.0)(w)
+    assert (urgency.top == "high")(w)
+    assert (urgency.p_at_least("medium") >= 0.5)(w)
+    assert (urgency == "high")(w)  # q-subject is the level NAME
+
+
+def test_between_latches():
+    pred = Predicate.between(("p_at_least", "urgency", "medium"), 0.5, 0.3)
+    vals = [
+        {"0": 0.9, "1": 0.05, "2": 0.05},  # 0.1 below exit -> False
+        {"0": 0.4, "1": 0.3, "2": 0.3},  # 0.6 >= enter -> True (latch)
+        {"0": 0.6, "1": 0.2, "2": 0.2},  # 0.4 above exit -> stays True
+        {"0": 0.9, "1": 0.05, "2": 0.05},  # 0.1 < exit -> False
+    ]
+    got = []
+    for i, probs in enumerate(vals):
+        w = Wave.decode(
+            questions(),
+            payload(i, i, urgency={"kind": "score", "probabilities": probs, "confidence": 0.5}),
+        )
+        got.append(pred(w))
+    assert got == [False, True, True, False]
+
+
+def test_all_any_not():
+    finished, intent = questions()[:2]
+    ws = wave_list()
+    a = Predicate.all_of(finished, intent.eq("support"))
+    b = Predicate.any_of(intent.ne("support"), Predicate(("q", "finished", None)))
+    for w in ws:
+        assert a(w) and b(w)
+    assert not any((~a)(w) for w in ws)
+
+
+# ---------------------------------------------------------------------------
+# context
+# ---------------------------------------------------------------------------
+
+
+def _feed(ctx, payloads):
+    qs = questions()
+    for p in payloads:
+        ctx._ingest(Wave.decode(qs, p))
+
+
+def test_context_latest_waves_coalesce():
+    ctx = Context()
+    payloads = [payload(i, i * 40) for i in range(3)]
+    _feed(ctx, payloads)
+    assert ctx.latest().wave_id == 2
+    assert [w.wave_id for w in ctx.waves()] == [0, 1, 2]
+    # all three waves share argmax values -> coalesced to the last
+    assert [w.wave_id for w in ctx.waves(coalesce=True)] == [2]
+
+
+def test_when_edges_and_cancel():
+    ctx = Context()
+    fired = []
+    handle = ctx.when(
+        Predicate(("q", "finished", None)), lambda c: fired.append(c.latest().wave_id)
+    )
+    off = payload(1, 40)
+    off["results"]["finished"] = {
+        "kind": "noul",
+        "choice": "false",
+        "probabilities": {"true": 0.2, "false": 0.8},
+        "confidence": 0.8,
+    }
+    payloads = [payload(0, 0), off, payload(2, 80)]
+    _feed(ctx, payloads)
+    assert fired == [0, 2]  # true, false, true
+    handle.cancel()
+    fired.clear()
+    _feed(ctx, payloads)
+    assert fired == []
+
+
+def test_onwave_and_get():
+    ctx = Context()
+    seen = []
+    ctx.onWave(lambda c: seen.append(c.latest().wave_id))
+    _feed(ctx, [payload(0, 0), payload(1, 40)])
+    assert seen == [0, 1]
+    assert ctx.get("intent").value == "support"
+
+
+def test_context_run_tasks():
+    async def go():
+        ctx = Context()
+        ran = []
+        t = ctx.run("job", lambda ctx: _coro(ran, "a"))
+        await asyncio.sleep(0)
+        with pytest.raises(ValueError):
+            ctx.run("job", lambda ctx: _coro(ran, "b"))
+        ctx.run("job", lambda ctx: _coro(ran, "b"), replace=True)
+        ctx.cancel("job")
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert t.cancelled()
+
+    async def _coro(ran, tag):
+        ran.append(tag)
+        await asyncio.sleep(10)
+
+    asyncio.run(go())
+
+
+def test_session_event():
+    ev = session_event({"type": "session.created"})
+    assert ev.type == "session.created"
+    ev = session_event({"type": "error", "code": "bad_question", "message": "no"})
+    assert ev.code == "bad_question" and ev.message == "no"
+
+
+# ---------------------------------------------------------------------------
+# facade + envelope
+# ---------------------------------------------------------------------------
+
+
+def test_facade_registers_questions():
+    app = Sense(api_key="k")
+    app.noul("finished?", id="finished")
+    app.choice("want?", ["support", "other"], id="intent")
+    app.score("urgent?", ["low", "high"], id="urgency")
+    s = app.session()
+    assert [q.id for q in s.questions] == ["finished", "intent", "urgency"]
+    env = s._envelope()
+    assert env["questions"]["finished"]["kind"] == "noul"
+    assert env["questions"]["intent"]["options"] == [
+        {"name": "support", "description": ""},
+        {"name": "other", "description": ""},
+    ]
+    assert env["questions"]["urgency"]["criteria"] == ["low", "high"]
+    assert callable(app.predicate(lambda w: True))
+
+
+def test_text_first_questions():
+    app = Sense(api_key="k")
+    finished = app.noul("Did the speaker just finish?")
+    intent = app.choice("What does the user want?", ["support", "sales", "other"])
+    assert finished.prompt == "Did the speaker just finish?"
+    # auto-slugged ids: lowercase, non-alnum -> _, unique
+    assert finished.id == "did_the_speaker_just_finish"
+    assert intent.id == "what_does_the_user_want"
+    s2 = Sense(api_key="k")
+    a = s2.noul("Same text?")
+    b = s2.noul("Same text?")
+    assert a.id != b.id and a.id.startswith("same_text")
+    # explicit id wins; empty text is rejected
+    assert s2.noul("Another question?", id="explicit").id == "explicit"
+    with pytest.raises(ValueError):
+        s2.noul("   ")
+    with pytest.raises(ValueError):
+        s2.choice("x?", ["a"], id="")
+    with pytest.raises(ValueError):
+        s2.choice("", ["a"])
+    # no id-first overload remains
+    import inspect
+
+    for name in ("noul", "choice", "score"):
+        params = [
+            p
+            for p in inspect.signature(getattr(Sense, name)).parameters.values()
+            if p.name != "self"
+        ]
+        assert (
+            params[0].name == "question"
+            and params[0].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        )
+        assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in params[1:] if p.name == "id")
+
+
+def test_when_decorator_returns_fn():
+    app = Sense(api_key="k")
+
+    @app.when(Predicate(lambda w: True))
+    async def handler(ctx):
+        return 1
+
+    assert callable(handler)
+    assert not isinstance(handler, object.__class__) and handler.__name__ == "handler"
+
+
+def test_session_defaults():
+    s = Session(api_key="sk-test")
+    assert s.questions == []
+    assert not s._closed
+    assert s.base_url == Session.DEFAULT_BASE_URL
+    q = s.add_question("finished", QuestionKind.BOOL, prompt="did they finish?")
+    assert q.id == "finished"
+    assert s.questions == [q]
+    assert s._realtime_url() == "wss://inference.urun.sh/v1/realtime?model=sense-latest:bf16"
+
+
+# ---------------------------------------------------------------------------
+# ruling 2: score comparison rule (bare question subject)
+# ---------------------------------------------------------------------------
+
+
+def test_score_bare_comparison_rule():
+    urgency = questions()[2]
+    w = Wave.decode(questions(), payload(0, 0))  # top=high, value=1.4
+    # eq/ne compare the TOP LEVEL NAME
+    assert (urgency == "high")(w)
+    assert not (urgency == "low")(w)
+    assert (urgency != "low")(w)
+    # gt/gte/lt/lte compare the EXPECTED ORDINAL
+    assert (urgency >= 1.0)(w)
+    assert not (urgency >= 2.0)(w)
+    assert (urgency < 2.0)(w)
+    assert not (urgency > 1.4)(w)
+    # gte on a string ordinal is not the name comparison
+    with pytest.raises(TypeError):
+        (urgency >= "high")(w)
+
+
+def test_question_vs_question_is_identity():
+    q1, q2 = questions()[0], questions()[1]
+    assert (q1 == q2) is False
+    assert (q1 == q1) is True
+    assert (q1 != q2) is True
+    assert q1 in [q1] and q2 not in [q1]  # membership uses identity now
+    assert hash(q1) == hash("finished")
+
+
+# ---------------------------------------------------------------------------
+# nits: registration validation, duplicate ids, signal, history bound
+# ---------------------------------------------------------------------------
+
+
+def test_add_question_replaces_duplicate():
+    s = Session(api_key="sk-test")
+    s.add_question("finished", QuestionKind.NOUL, prompt="a?")
+    q2 = s.add_question("finished", QuestionKind.NOUL, prompt="b?")
+    assert len(s.questions) == 1 and s.questions[0] is q2
+
+
+def test_score_levels_validated_2_to_10():
+    s = Session(api_key="sk-test")
+    with pytest.raises(ValueError):
+        s.add_question("u", QuestionKind.SCORE, levels=["only"])
+    with pytest.raises(ValueError):
+        s.add_question("u", QuestionKind.SCORE, levels=[str(i) for i in range(11)])
+    s.add_question("u", QuestionKind.SCORE, levels=["low", "high"])  # ok
+    with pytest.raises(ValueError):
+        Question(id="v", kind=QuestionKind.SCORE, levels=["one"])
+
+
+def test_context_run_signal():
+    async def go():
+        ctx = Context()
+        assert not ctx.signal.is_set()
+        task = ctx.run("job", lambda ctx: asyncio.sleep(10))
+        sig = ctx.signal
+        assert sig is ctx.signal
+        ctx.cancel("job")
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert task.cancelled()
+        assert sig.is_set()
+
+    asyncio.run(go())
+
+
+def test_cancel_barge_in_flag():
+    class FakeSession:
+        def __init__(self):
+            self.barges = 0
+
+        def _barge_in(self):
+            self.barges += 1
+
+    async def go():
+        fs = FakeSession()
+        ctx = Context(session=fs)
+        t1 = ctx.run("reply", lambda ctx: asyncio.sleep(10))
+        t2 = ctx.run("draft", lambda ctx: asyncio.sleep(10))
+        # supersede: no barge-in
+        ctx.run("draft", lambda ctx: asyncio.sleep(10), replace=True)
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert fs.barges == 0 and t2.cancelled()
+        # explicit cancel with the flag off: no barge-in
+        ctx.cancel("reply", barge_in=False)
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert fs.barges == 0 and t1.cancelled()
+        # default cancel: barge-in fires
+        ctx.run("other", lambda ctx: asyncio.sleep(10))
+        ctx.cancel("other")
+        assert fs.barges == 1
+
+    asyncio.run(go())
+
+
+def test_history_bounded_512():
+    ctx = Context()
+    for i in range(600):
+        ctx._ingest(Wave.decode(questions(), payload(i, i)))
+    assert len(ctx.waves()) == 512
+    assert ctx.latest().wave_id == 599
+    assert ctx.waves()[0].wave_id == 88  # 600 - 512
+
+
+def test_session_waves_is_live_subscription():
+    async def go():
+        s = Session(api_key="sk-test")
+        got = []
+
+        async def consume():
+            async for w in s.waves():
+                got.append(w.wave_id)
+
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0)
+        s._accept(Wave.decode(questions(), payload(0, 0)))
+        s._accept(Wave.decode(questions(), payload(1, 40)))
+        await asyncio.sleep(0)
+        assert got == [0, 1]
+        task.cancel()
+
+    asyncio.run(go())
+
+
+# ---------------------------------------------------------------------------
+# per-source waves (client-side degradation)
+# ---------------------------------------------------------------------------
+
+
+def test_per_source_labeling_and_filters():
+    s = Session(api_key="sk-test")
+    _register(s)
+    w0 = Wave.decode(questions(), payload(0, 0))
+    w1 = Wave.decode(questions(), payload(1, 40))
+    # simulate: default drained, then mic drained
+    s._active_source = "default"
+    s._accept(w0)
+    s._active_source = "mic"
+    s._accept(w1)
+    assert s._ctx.latest("mic").wave_id == 1
+    assert s._ctx.latest("default").wave_id == 0
+    assert s._ctx.latest().wave_id == 1
+    seen = []
+    s._ctx.when(
+        Predicate(("q", "finished", None)), lambda c: seen.append(c.latest().wave_id), source="mic"
+    )
+    s._active_source = "default"  # default drained again: next wave labels default
+    s._accept(Wave.decode(questions(), payload(2, 80)))  # default source: mic when must not fire
+    assert seen == []
+    s._active_source = "mic"
+    s._accept(Wave.decode(questions(), payload(3, 120)))
+    assert seen == [3]
+    # server-labeled source wins over client labeling
+    labeled = Wave.decode(questions(), dict(payload(4, 160), source="server"))
+    s._accept(labeled)
+    assert s._ctx.latest("server").wave_id == 4
+
+
+# ---------------------------------------------------------------------------
+# ruling 4: text-only session
+# ---------------------------------------------------------------------------
+
+
+def test_wire_text_only_session():
+    async def go():
+        state = {"messages": [], "creates": 0}
+
+        async def handler(request):
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            async for msg in ws:
+                if msg.type is not WSMsgType.TEXT:
+                    break
+                ev = json.loads(msg.data)
+                state["messages"].append(ev["type"])
+                if ev["type"] == "response.create":
+                    state["creates"] += 1
+                    delta = (
+                        dec("finished", 0, "true", {"true": 0.9, "false": 0.1}, 0.9)
+                        + "\n"
+                        + dec("intent", 0, "support", {"support": 0.9, "other": 0.1}, 0.9)
+                        + "\n"
+                    )
+                    await ws.send_json({"type": "response.output_text.delta", "delta": delta})
+                    await ws.send_json({"type": "response.completed"})
+
+        runner, port = await _start_fake(handler)
+        try:
+            s = Session(api_key="sk-test", base_url=f"http://127.0.0.1:{port}")
+            _register(s)
+            got = []
+
+            task = asyncio.create_task(_consume(s, got))
+            # TEXT ONLY: a text push opens and drives the turn, zero audio.
+            s.text.push("Say something.")
+            for _ in range(500):
+                if got:
+                    break
+                await asyncio.sleep(0.01)
+            task.cancel()
+            await s.close()
+            assert got, "text-only session must open a turn and yield waves"
+            assert "input_audio_buffer.append" not in state["messages"]
+            assert "input_audio_buffer.commit" not in state["messages"]
+            assert "conversation.item.create" in state["messages"]
+            assert "response.create" in state["messages"]
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(go())
+
+
+def test_close_cancels_tracked_tasks():
+    async def go():
+        s = Session(api_key="sk-test")
+        cancelled = []
+        task = s._ctx.run(
+            "reply", lambda ctx: asyncio.sleep(10), on_cancel=lambda: cancelled.append(True)
+        )
+        await asyncio.sleep(0)
+        await s.close()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert task.cancelled()
+        assert cancelled == [True]
+
+    asyncio.run(go())
+
+
+# ---------------------------------------------------------------------------
+# wire e2e against a fake lane
+# ---------------------------------------------------------------------------
+
+
+def dec(qid, t_ms, choice, probs, conf):
+    return json.dumps(
+        {
+            "event": "sense.decision",
+            "id": qid,
+            "t_ms": t_ms,
+            "choice": choice,
+            "probabilities": probs,
+            "confidence": conf,
+        }
+    )
+
+
+async def _start_fake(handler):
+    app = web.Application()
+    app.router.add_get("/v1/realtime", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    return runner, runner.addresses[0][1]
+
+
+def _register(s):
+    s.add_question("finished", QuestionKind.NOUL, prompt="finished?")
+    s.add_question("intent", QuestionKind.CHOICE, prompt="want?", options=["support", "other"])
+
+
+async def _wait_until(condition, attempts=500):
+    """Poll condition() until it turns True, sleeping 10ms between attempts."""
+    for _ in range(attempts):
+        if condition():
+            return
+        await asyncio.sleep(0.01)
+
+
+async def _consume(s, got):
+    """Collect waves from s.run() into got."""
+    async for w in s.run():
+        got.append(w)
+
+
+async def _wire_happy_handler(request, state):
+    assert request.headers["Authorization"] == "Bearer sk-test"
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    async for msg in ws:
+        if msg.type is not WSMsgType.TEXT:
+            break
+        ev = json.loads(msg.data)
+        state["messages"].append(ev["type"])
+        if ev["type"] == "session.update":
+            state["update"] = ev
+            await ws.send_json({"type": "error", "error": {"code": "empty_buffer"}})  # benign
+        elif ev["type"] == "response.create":
+            state["creates"] += 1
+            if state["creates"] == 1:
+                # two waves inside one delta: the repeat qid flushes wave 0
+                delta = "\n".join(
+                    [
+                        dec("finished", 0, "true", {"true": 0.9, "false": 0.1}, 0.9),
+                        dec("intent", 0, "other", {"support": 0.3, "other": 0.7}, 0.7),
+                        dec("finished", 40, "false", {"true": 0.2, "false": 0.8}, 0.8),
+                        dec("intent", 40, "support", {"support": 0.6, "other": 0.4}, 0.6),
+                    ]
+                )
+                await ws.send_json({"type": "response.output_text.delta", "delta": delta + "\n"})
+                await ws.send_json({"type": "response.completed"})
+            else:
+                await ws.send_json(
+                    {
+                        "type": "response.output_text.delta",
+                        "delta": dec("finished", 80, "true", {"true": 0.95, "false": 0.05}, 0.95)
+                        + "\n",
+                    }
+                )
+                await ws.send_json(
+                    {
+                        "type": "response.output_text.delta",
+                        "delta": dec("intent", 80, "other", {"support": 0.1, "other": 0.9}, 0.9)
+                        + "\n",
+                    }
+                )
+                await ws.send_json({"type": "response.completed"})
+
+
+async def _wire_reconnect_handler(request, state):
+    state["connections"] += 1
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    if state["connections"] == 1:
+        async for msg in ws:
+            if msg.type is not WSMsgType.TEXT:
+                break
+            if json.loads(msg.data)["type"] == "response.create":
+                await ws.send_json({"type": "error", "error": {"code": "session_gone"}})
+                await ws.close(code=1011)
+                return
+    else:
+        async for msg in ws:
+            if msg.type is not WSMsgType.TEXT:
+                break
+            if json.loads(msg.data)["type"] == "response.create":
+                delta = (
+                    dec("finished", 0, "true", {"true": 1.0, "false": 0.0}, 1.0)
+                    + "\n"
+                    + dec("intent", 0, "support", {"support": 1.0, "other": 0.0}, 1.0)
+                    + "\n"
+                )
+                await ws.send_json({"type": "response.output_text.delta", "delta": delta})
+                await ws.send_json({"type": "response.completed"})
+
+
+def test_wire_happy_path():
+    async def go():
+        state = {"messages": [], "update": None, "creates": 0}
+
+        async def handler(request):
+            return await _wire_happy_handler(request, state)
+
+        runner, port = await _start_fake(handler)
+        try:
+            s = Session(api_key="sk-test", base_url=f"http://127.0.0.1:{port}", hz=25.0)
+            _register(s)
+            fired = []
+            s.when(Predicate(("q", "finished", None)), lambda c: fired.append(c.latest().wave_id))
+            got = []
+            task = asyncio.create_task(_consume(s, got))
+            # Mic-style: each push drives the turn lifecycle. Turn 1 (waves
+            # 0+1) opens on the first push; the second push opens turn 2.
+            s.audio.push(b"\x00\x00" * 48)
+            await _wait_until(lambda: len(got) >= 2)
+            s.audio.push(b"\x00\x00" * 48)
+            await _wait_until(lambda: len(got) >= 3)
+            task.cancel()
+            await s.close()
+            assert "input_audio_buffer.append" in state["messages"]
+            sess = state["update"]["session"]
+            assert sess["model"] == "sense-latest:bf16" and sess["modalities"] == ["text"]
+            env = json.loads(sess["instructions"])
+            assert env["hz"] == 25.0 and set(env["questions"]) == {"finished", "intent"}
+            assert [w.wave_id for w in got] == [0, 1, 2]
+            assert got[0].t_ms == 0 and got[1].t_ms == 40 and got[2].t_ms == 80
+            assert got[0].result("finished").value is True
+            assert got[0].result("intent").value == "other"
+            assert got[1].result("finished").value is False
+            assert fired == [0, 2]
+            assert s.stats.waves == 3 and s.stats.decisions == 6
+            assert s.stats.errors == 0 and s.stats.protocol_errors == 0
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(go())
+
+
+def test_wave_t_ms_prefers_the_media_position():
+    """The wave's t_ms is the decision's MEDIA timestamp (protocol §6):
+    audio_t_ms — the position the wave decided on — wins over a t_ms that
+    older seats still stamp with per-wave compute time."""
+
+    async def go():
+        async def handler(request):
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            async for msg in ws:
+                if msg.type is not WSMsgType.TEXT:
+                    break
+                ev = json.loads(msg.data)
+                if ev["type"] == "session.update":
+                    await ws.send_json({"type": "error", "error": {"code": "empty_buffer"}})
+                elif ev["type"] == "response.create":
+                    lines = []
+                    for qid, choice, probs in (
+                        ("finished", "true", {"true": 0.9, "false": 0.1}),
+                        ("intent", "other", {"support": 0.2, "other": 0.8}),
+                    ):
+                        line = json.loads(dec(qid, 54, choice, probs, 0.9))
+                        line["audio_t_ms"] = 500  # the media position
+                        lines.append(json.dumps(line))
+                    await ws.send_json({"type": "response.output_text.delta", "delta": "\n".join(lines) + "\n"})
+                    await ws.send_json({"type": "response.completed"})
+            return ws
+
+        runner, port = await _start_fake(handler)
+        try:
+            s = Session(api_key="sk-test", base_url=f"http://127.0.0.1:{port}")
+            _register(s)
+            got = []
+            task = asyncio.create_task(_consume(s, got))
+            s.audio.push(b"\x00\x00" * 48)
+            await _wait_until(lambda: len(got) >= 1)
+            task.cancel()
+            await s.close()
+            assert got[0].t_ms == 500
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(go())
+
+
+def test_wire_incomplete_wave_is_protocol_error():
+    async def go():
+        async def handler(request):
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            async for msg in ws:
+                if msg.type is not WSMsgType.TEXT:
+                    break
+                ev = json.loads(msg.data)
+                if ev["type"] == "response.create":
+                    # missing `intent`: incomplete wave must never yield
+                    await ws.send_json(
+                        {
+                            "type": "response.output_text.delta",
+                            "delta": dec("finished", 0, "true", {"true": 0.9, "false": 0.1}, 0.9)
+                            + "\n",
+                        }
+                    )
+                    await ws.send_json({"type": "response.completed"})
+
+        runner, port = await _start_fake(handler)
+        try:
+            s = Session(api_key="sk-test", base_url=f"http://127.0.0.1:{port}")
+            _register(s)
+            got = []
+
+            task = asyncio.create_task(_consume(s, got))
+            s.audio.push(b"\x00\x00" * 48)  # the push opens the turn
+            try:
+                await asyncio.wait_for(task, timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
+            await s.close()
+            assert got == []
+            assert s.stats.protocol_errors >= 1
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(go())
+
+
+def test_wire_session_gone_reconnects_fresh():
+    async def go():
+        state = {"connections": 0}
+
+        async def handler(request):
+            return await _wire_reconnect_handler(request, state)
+
+        runner, port = await _start_fake(handler)
+        try:
+            s = Session(api_key="sk-test", base_url=f"http://127.0.0.1:{port}")
+            _register(s)
+            got = []
+            task = asyncio.create_task(_consume(s, got))
+            # First push opens a turn on connection 1; the lane dies with
+            # session_gone, the SDK reconnects fresh, and a second push
+            # opens the turn on connection 2.
+            s.audio.push(b"\x00\x00" * 48)
+            await asyncio.sleep(0.3)
+            s.audio.push(b"\x00\x00" * 48)
+            await _wait_until(lambda: len(got) >= 1)
+            task.cancel()
+            await s.close()
+            assert state["connections"] == 2
+            # fresh session: wave ids restart at 0
+            assert got[0].wave_id == 0
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(go())
+
+
+def test_wire_insufficient_credits_is_terminal():
+    async def go():
+        state = {"connections": 0}
+
+        async def handler(request):
+            state["connections"] += 1
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            async for msg in ws:
+                if msg.type is not WSMsgType.TEXT:
+                    break
+                if json.loads(msg.data)["type"] == "response.create":
+                    await ws.send_json(
+                        {
+                            "type": "error",
+                            "error": {
+                                "code": "insufficient_credits",
+                                "message": "the organization is out of credits — top up to continue",
+                            },
+                        }
+                    )
+                    await ws.close(code=1011)
+                    return
+
+        runner, port = await _start_fake(handler)
+        try:
+            s = Session(api_key="sk-test", base_url=f"http://127.0.0.1:{port}")
+            _register(s)
+            got = []
+            task = asyncio.create_task(_consume(s, got))
+            s.audio.push(b"\x00\x00" * 48)  # the push opens the turn
+            with pytest.raises(OutOfCreditsError):
+                await asyncio.wait_for(task, timeout=2.0)
+            # The cut is an end, not churn: no reconnect dial may follow.
+            await asyncio.sleep(0.3)
+            assert state["connections"] == 1
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(go())
+
+
+def test_wire_close_reason_credits_exhausted_is_terminal():
+    async def go():
+        state = {"connections": 0}
+
+        async def handler(request):
+            state["connections"] += 1
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            # No error event: the extend/admission rail just cuts the lane.
+            await ws.close(code=1011, message=b"credits_exhausted")
+
+        runner, port = await _start_fake(handler)
+        try:
+            s = Session(api_key="sk-test", base_url=f"http://127.0.0.1:{port}")
+            _register(s)
+            got = []
+            task = asyncio.create_task(_consume(s, got))
+            s.audio.push(b"\x00\x00" * 48)
+            with pytest.raises(OutOfCreditsError):
+                await asyncio.wait_for(task, timeout=2.0)
+            await asyncio.sleep(0.3)
+            assert state["connections"] == 1
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(go())
+
+
+def test_dial_402_is_out_of_credits():
+    async def go():
+        state = {"connections": 0}
+
+        async def handler(request):
+            state["connections"] += 1
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "the organization is out of credits — top up to continue",
+                        "type": "insufficient_quota",
+                        "code": "insufficient_credits",
+                    }
+                },
+                status=402,
+            )
+
+        runner, port = await _start_fake(handler)
+        try:
+            s = Session(api_key="sk-test", base_url=f"http://127.0.0.1:{port}")
+            _register(s)
+            got = []
+            with pytest.raises(OutOfCreditsError):
+                async for _ in s.run():
+                    got.append(_)
+            # Not a retryable refusal: exactly one dial attempt.
+            await asyncio.sleep(0.3)
+            assert state["connections"] == 1
+            assert got == []
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(go())

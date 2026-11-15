@@ -1,0 +1,9 @@
+{
+  "questions": {
+    "finished": {"kind": "noul", "prompt": "Did the current speaker just finish their turn?"},
+    "user_speaking": {"kind": "noul", "prompt": "Is a human speaking right now?"},
+    "intent": {"kind": "choice", "prompt": "What does the user want?", "options": ["support", "sales", "other"]},
+    "actions": {"kind": "choice", "prompt": "What should the agent do?", "options": ["respond", "ignore", "wait"]},
+    "urgency": {"kind": "score", "prompt": "How urgent is the request?", "levels": ["low", "medium", "high"]}
+  }
+}
