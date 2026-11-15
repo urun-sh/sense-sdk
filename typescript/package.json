@@ -1,0 +1,59 @@
+{
+  "name": "@urun-sh/sense",
+  "version": "0.1.11",
+  "description": "TypeScript SDK for the Sense realtime question stream",
+  "license": "Apache-2.0",
+  "author": "Urun Platform, Inc",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "examples",
+    "!examples/**/*.test.ts",
+    "LICENSE"
+  ],
+  "bin": {
+    "sense-cheese-demo": "./bin/sense-cheese-demo"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/urun-sh/sense-sdk.git",
+    "directory": "typescript"
+  },
+  "homepage": "https://github.com/urun-sh/sense-sdk/tree/main/typescript#readme",
+  "bugs": {
+    "url": "https://github.com/urun-sh/sense-sdk/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/fix-dts.mjs && node scripts/stage-assets.mjs",
+    "prepack": "npm run build",
+    "test": "bun test",
+    "conformance": "bun test ../conformance/typescript_runner.ts",
+    "lint": "oxlint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.3",
+    "ws": "^8.22.1"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/ws": "^8.18.2",
+    "jscpd": "^5.4.2",
+    "oxlint": "^1.91.0",
+    "typescript": "^5.9.0"
+  }
+}

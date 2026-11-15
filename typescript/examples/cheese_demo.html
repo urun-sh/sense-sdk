@@ -1,0 +1,307 @@
+<!doctype html>
+<!-- 🧀 Sense SDK cheese classifier — served by examples/typescript/cheese_demo.ts -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>🧀 cheese demo</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149;
+    --grey: #656d76; --magenta: #db61a2; --cyan: #76e3ea; --dim: #8b949e;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: #0d1117; color: #e6edf3;
+    font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+    min-height: 100dvh; display: flex; flex-direction: column;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+  }
+  header { display: flex; flex-direction: column; gap: 10px; }
+  #pill { font-size: 14px; }
+  #pill.online { color: var(--green); }
+  #pill.connecting, #pill.waiting, #pill.stalled { color: var(--yellow); }
+  #pill.error { color: var(--red); }
+  #pill.mic-only, #pill.stopped { color: var(--grey); }
+  #meter { display: flex; gap: 2px; align-items: flex-end; height: 28px; }
+  #meter i { flex: 1; background: var(--grey); min-height: 2px; border-radius: 1px; }
+  #speech { font-size: 14px; color: var(--dim); }
+  main { flex: 1; display: flex; align-items: center; justify-content: center; text-align: center; }
+  #verdict { font-size: 20px; color: var(--dim); max-width: 28em; }
+  #verdict.love, #verdict.like { color: var(--green); }
+  #verdict.hate, #verdict.dislike { color: var(--red); }
+  #verdict.meh { color: var(--yellow); }
+  #verdict.love .big, #verdict.like .big, #verdict.hate .big, #verdict.dislike .big, #verdict.meh .big { color: var(--magenta); }
+  #verdict .kind { color: var(--cyan); font-weight: 700; }
+  #verdict .big { font-size: 30px; font-weight: 700; }
+  #verdict .detail { margin-top: 8px; font-size: 20px; }
+  footer { display: flex; flex-direction: column; gap: 10px; }
+  #stats { font-size: 12px; color: var(--grey); font-family: ui-monospace, monospace; text-align: center; min-height: 1em; }
+  #toggle {
+    min-height: 64px; font-size: 20px; font-weight: 600; border: 0; border-radius: 14px;
+    background: #21262d; color: #e6edf3; touch-action: manipulation;
+  }
+  #toggle:disabled { opacity: 0.5; }
+  #toggle.streaming { background: #da3633; }
+</style>
+</head>
+<body>
+  <header>
+    <div id="pill" class="connecting">● connecting</div>
+    <div id="meter"></div>
+    <div id="speech">speech unknown</div>
+  </header>
+  <main><div id="verdict">listening…</div></main>
+  <footer>
+    <div id="stats"></div>
+    <button id="toggle">Start</button>
+  </footer>
+<script>
+"use strict";
+
+const pill = document.getElementById("pill");
+const meterEl = document.getElementById("meter");
+const speechEl = document.getElementById("speech");
+const verdictEl = document.getElementById("verdict");
+const statsEl = document.getElementById("stats");
+const toggle = document.getElementById("toggle");
+
+// -- status and meter ---------------------------------------------------------
+
+const STATES = {
+  connecting: "● connecting",
+  waiting: "● connected · waiting for Sense",
+  stalled: "● connected, but Sense is not responding",
+  online: "● Sense online",
+  "mic-only": "○ sense disabled (mic test)",
+  stopped: "○ stopped",
+  error: "● demo stopped",
+};
+
+function setStatus(name) {
+  pill.className = name;
+  pill.textContent = STATES[name] ?? name;
+}
+
+// "waiting" becomes "stalled" after a sustained silence; the timer arms below.
+const STALL_MS = 15000;
+let stallTimer = null;
+let micStreaming = false;
+let helloSeen = false;
+function disarmStall() {
+  if (stallTimer !== null) {
+    clearTimeout(stallTimer);
+    stallTimer = null;
+  }
+}
+function armStallIfReady() {
+  if (micStreaming && helloSeen) armStall();
+}
+function armStall() {
+  disarmStall();
+  stallTimer = setTimeout(() => {
+    stallTimer = null;
+    if (pill.className === "waiting") setStatus("stalled");
+  }, STALL_MS);
+}
+
+const CELLS = 20;
+for (let i = 0; i < CELLS; i++) meterEl.appendChild(document.createElement("i"));
+let level = 0;
+
+function meter(peak) {
+  level = Math.max(peak, level * 0.7);
+  const db = level > 0 ? 20 * Math.log10(level) : -Infinity;
+  const filled = Math.max(0, Math.min(CELLS, ((db + 60) / 60) * CELLS));
+  const color = db >= -6 ? "var(--red)" : db >= -12 ? "var(--yellow)" : db > -60 ? "var(--green)" : "var(--grey)";
+  const cells = [...meterEl.children];
+  for (let i = 0; i < cells.length; i++) {
+    const frac = Math.max(0, Math.min(1, filled - i));
+    cells[i].style.height = Math.max(2, frac * 28) + "px";
+    cells[i].style.background = color;
+  }
+}
+
+let speaking = null;
+function setSpeaking(v) {
+  speaking = v;
+  speechEl.textContent = v === null ? "speech unknown" : v ? "🎙️ talking" : "· no speech";
+}
+
+// -- verdict card -------------------------------------------------------------
+
+// One emoji per feeling level so the verdict card can distinguish like from love.
+const FEELING_EMOJI = {
+  hate: "🧀🤮",
+  dislike: "🧀🙁",
+  meh: "🧀😐",
+  like: "🧀🙂",
+  love: "🧀❤️",
+};
+
+function renderVerdict(v) {
+  if (!v.talking) {
+    verdictEl.className = "";
+    verdictEl.textContent = "— not cheese";
+    return;
+  }
+  const emoji = FEELING_EMOJI[v.feeling] ?? "🧀😐";
+  const sentiment = v.feeling === "meh" ? "neutral sentiment" : `you ${v.feeling} it`;
+  verdictEl.className = v.feeling;
+  // Build nodes with textContent: verdict fields come from the service and
+  // must never be parsed as HTML on a page that holds mic permission.
+  const big = document.createElement("div");
+  big.className = "big";
+  big.textContent = "🧀 CHEESE";
+  const detail = document.createElement("div");
+  detail.className = "detail";
+  const kind = document.createElement("span");
+  kind.className = "kind";
+  kind.textContent = String(v.kind);
+  detail.append(kind, ` (${Number(v.p).toFixed(2)}) · ${emoji} ${sentiment} (${Number(v.score).toFixed(1)})`);
+  verdictEl.replaceChildren(big, detail);
+}
+
+// -- capture: mic → 24 kHz PCM16, 40 ms frames --------------------------------
+
+const WORKLET = `
+class Capture extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = []; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) {
+      for (let i = 0; i < ch.length; i++) this.buf.push(ch[i]);
+      while (this.buf.length >= 960) {
+        const frame = this.buf.splice(0, 960);
+        const pcm = new Int16Array(960);
+        let peak = 0;
+        for (let i = 0; i < 960; i++) {
+          const s = Math.max(-1, Math.min(1, frame[i]));
+          pcm[i] = Math.round(s * 32767);
+          peak = Math.max(peak, Math.abs(s));
+        }
+        this.port.postMessage({ pcm: pcm.buffer, peak }, [pcm.buffer]);
+      }
+    }
+    return true;
+  }
+}
+registerProcessor("capture", Capture);
+`;
+
+const state = { ws: null, ctx: null, stream: null, started: false, relayError: null };
+
+async function start() {
+  toggle.disabled = true;
+  setStatus("connecting");
+  micStreaming = false;
+  helloSeen = false;
+  state.relayError = null;
+  try {
+    // The per-run access token arrives in the URL fragment printed by the
+    // server (never sent in requests or Referer); forward it on the upgrade.
+    const token = location.hash.slice(1);
+    if (!token) throw new Error("open the full URL printed in the terminal (it includes an access token)");
+    state.ws = new WebSocket(`wss://${location.host}/ws?t=${encodeURIComponent(token)}`);
+    state.ws.onmessage = onMessage;
+    state.ws.onclose = () => {
+      disarmStall();
+      if (state.started) {
+        setStatus("error");
+        verdictEl.textContent = "relay connection lost";
+        stop();
+      }
+    };
+    await new Promise((resolve, reject) => {
+      state.ws.onopen = resolve;
+      state.ws.onerror = () =>
+        reject(new Error("relay connection refused — open the exact URL printed in the terminal for this run"));
+    });
+    state.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    state.ctx = new AudioContext({ sampleRate: 24000 });
+    if (state.ctx.sampleRate !== 24000) throw new Error("browser ignored the 24 kHz capture rate");
+    await state.ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" })));
+    const node = new AudioWorkletNode(state.ctx, "capture");
+    node.port.onmessage = (e) => {
+      meter(e.data.peak);
+      if (state.ws && state.ws.readyState === WebSocket.OPEN) state.ws.send(e.data.pcm);
+    };
+    state.ctx.createMediaStreamSource(state.stream).connect(node);
+    // The relay may have closed during setup; fail so the catch block releases the microphone.
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) throw new Error("relay connection lost");
+    state.started = true;
+    // Arm the stall timer once the mic is streaming and Sense has said hello
+    // (either may come first).
+    micStreaming = true;
+    armStallIfReady();
+    toggle.textContent = "Stop";
+    toggle.classList.add("streaming");
+  } catch (err) {
+    setStatus("error");
+    // Prefer the relay's own reason (e.g. budget used) over a generic setup error.
+    verdictEl.textContent = state.relayError ?? err.message;
+    await stop();
+  } finally {
+    toggle.disabled = false;
+  }
+}
+
+async function stop() {
+  state.started = false;
+  disarmStall();
+  if (pill.className !== "error") setStatus("stopped");
+  toggle.textContent = "Start";
+  toggle.classList.remove("streaming");
+  if (state.ws) {
+    state.ws.onmessage = null;
+    state.ws.onclose = null;
+    state.ws.close();
+    state.ws = null;
+  }
+  if (state.stream) {
+    for (const track of state.stream.getTracks()) track.stop();
+    state.stream = null;
+  }
+  if (state.ctx) {
+    await state.ctx.close().catch(() => {});
+    state.ctx = null;
+  }
+  level = 0;
+  meter(0);
+  speechEl.textContent = "speech unknown";
+  speaking = null;
+}
+
+// -- relay events ---------------------------------------------------------------
+
+function onMessage(ev) {
+  const msg = JSON.parse(ev.data);
+  if (msg.type === "hello") {
+    setStatus(msg.mode === "online" ? "waiting" : "mic-only");
+    helloSeen = msg.mode === "online";
+    armStallIfReady();
+  } else if (msg.type === "wave") {
+    disarmStall();
+    setStatus("online");
+    setSpeaking(msg.verdict.speaking);
+    renderVerdict(msg.verdict);
+  } else if (msg.type === "stats") {
+    statsEl.textContent = "stats " + JSON.stringify(msg.stats);
+  } else if (msg.type === "error") {
+    disarmStall();
+    setStatus("error");
+    state.relayError = msg.message;
+    verdictEl.textContent = msg.message;
+    stop();
+  } else if (msg.type === "ended") {
+    disarmStall();
+    if (msg.reason === "cap") verdictEl.textContent = "5 min cap reached — stopping";
+    stop();
+  }
+}
+
+toggle.onclick = () => (state.started ? stop() : start());
+</script>
+</body>
+</html>

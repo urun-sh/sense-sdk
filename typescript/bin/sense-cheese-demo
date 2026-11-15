@@ -1,0 +1,8 @@
+#!/usr/bin/env bun
+// npm normalizes `bin` entries and drops any that point at a `.ts` file, so the
+// published executable is this extensionless shim; Bun executes the TypeScript
+// demo it imports. Both bin/ and examples/ ship in the package tarball. The
+// demo guards its startup on import.meta.main, so the shim must call main().
+import { main } from "../examples/cheese_demo.ts";
+
+main(process.argv.slice(2));

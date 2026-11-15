@@ -1,0 +1,382 @@
+"""Offline tests for the examples/python/cheese_demo.py example script.
+
+The demo is loaded from its repo location without importing it as a package:
+it is a script, and its import-time work (Sense() plus question registration)
+is pure in-memory state, so importing it here is safe and offline.
+"""
+
+import asyncio
+import importlib.util
+import io
+import logging
+import pathlib
+import sys
+from collections import deque
+from types import SimpleNamespace
+
+import pytest
+from rich.cells import cell_len
+from rich.console import Console, Group
+
+DEMO_PATH = pathlib.Path(__file__).resolve().parents[1] / "src" / "sense" / "examples" / "cheese_demo.py"
+
+
+@pytest.fixture(scope="module")
+def demo():
+    spec = importlib.util.spec_from_file_location("cheese_demo", DEMO_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class FakeResult:
+    def __init__(self, value, p, options=None, top=None):
+        self.value = value
+        self.p = p
+        self.options = options or {}
+        self.top = top if top is not None else (value if isinstance(value, str) else None)
+
+    def p_option(self, option):
+        return self.options.get(option, 0.0)
+
+
+class FakeScore(FakeResult):
+    """A score result: .value is the expected ordinal, .top the argmax level."""
+
+    def __init__(self, top, p, score):
+        super().__init__(score, p, top=top)
+        self.level = top
+
+
+class FakeWave:
+    def __init__(self, results, wave_id=7):
+        self.wave_id = wave_id
+        self._results = results
+
+    def result(self, qid):
+        return self._results[qid]
+
+
+class FakeSession:
+    # The real SDK names the live wire `session._wire` (a _transport.Wire);
+    # this stub must mirror the SDK, not whatever the demo reads.
+    _wire = object()
+
+
+class FakeDisplay:
+    def __init__(self):
+        self.sense_state = "connecting"
+        self.last_wave_ts = 0.0
+        self.wire = None
+        self.diagnostic = ""
+        self.wave_id = -1
+        self.speaking = None
+        self.verdict = None
+        self.rendered = 0
+
+    def render(self):
+        self.rendered += 1
+
+
+def wave(**overrides):
+    """A confident talking-about-brie-and-loving-it wave; override any field."""
+    fields = {
+        "speech": True,
+        "cheese_p": 0.9,
+        "kind": "brie",
+        "kind_p": 0.9,
+        "feeling": "love",
+        "feeling_p": 0.9,
+        "feeling_score": 3.9,
+    }
+    fields.update(overrides)
+    return FakeWave({
+        "speech": FakeResult(fields["speech"], 0.9 if fields["speech"] else 0.1),
+        "cheese": FakeResult(fields["cheese_p"] >= 0.6, fields["cheese_p"]),
+        "cheese_type": FakeResult(fields["kind"], fields["kind_p"], {fields["kind"]: fields["kind_p"]}),
+        "feeling": FakeScore(fields["feeling"], fields["feeling_p"], fields["feeling_score"]),
+    })
+
+
+# ---------------------------------------------------------------------------
+# show_wave: the wave -> verdict mapping
+# ---------------------------------------------------------------------------
+
+
+def test_show_wave_reports_talking_with_kind_and_feeling(demo):
+    display = FakeDisplay()
+    demo.show_wave(wave(), FakeSession(), display)
+    assert display.sense_state == "online"
+    assert display.speaking is True
+    assert display.verdict == {"talking": True, "kind": "brie", "feeling": "love", "score": 3.9, "p": 0.9}
+    assert display.wave_id == 7
+    assert display.wire is FakeSession._wire
+    assert display.rendered == 1
+
+
+def test_show_wave_threshold_is_inclusive(demo):
+    display = FakeDisplay()
+    demo.show_wave(wave(cheese_p=0.6), FakeSession(), display)
+    assert display.verdict["talking"] is True
+    display = FakeDisplay()
+    demo.show_wave(wave(cheese_p=0.59), FakeSession(), display)
+    assert display.verdict == {"talking": False}
+
+
+def test_show_wave_nulls_unconfident_kind_and_feeling(demo):
+    display = FakeDisplay()
+    demo.show_wave(wave(kind_p=0.3, feeling_p=0.3), FakeSession(), display)
+    assert display.verdict["kind"] == "unknown type"
+    assert display.verdict["feeling"] == "meh"
+
+
+def test_show_wave_null_verdict_when_not_speaking(demo):
+    display = FakeDisplay()
+    demo.show_wave(wave(speech=False), FakeSession(), display)
+    assert display.sense_state == "online"
+    assert display.speaking is False
+
+
+def test_error_state_maps_exception_types(demo):
+    assert demo.error_state(demo.MicrophoneError("boom")) == "mic_error"
+    assert demo.error_state(demo.SenseUnavailable("boom")) == "offline"
+    assert demo.error_state(RuntimeError("boom")) == "error"
+
+
+# ---------------------------------------------------------------------------
+# cleanup: survives a second Ctrl-C, closes everything either way
+# ---------------------------------------------------------------------------
+
+
+def cleanup_args(closed, gate=None):
+    """Fakes shaped like the real resources: mic.stop, waves.aclose, session.close."""
+    display = SimpleNamespace(live=SimpleNamespace(stop=lambda: closed.append("live")))
+
+    def closer(name):
+        async def close():
+            if gate is not None:  # stay suspended until the test releases us
+                await gate.wait()
+            await asyncio.sleep(0.01)
+            closed.append(name)
+
+        return close
+
+    mic = SimpleNamespace(stop=closer("mic"))
+    waves = SimpleNamespace(aclose=closer("waves"))
+    session = SimpleNamespace(close=closer("session"))
+    tasks = [asyncio.create_task(asyncio.sleep(3600)) for _ in range(2)]
+    return tasks, mic, waves, session, display
+
+
+def test_cleanup_completes_normally(demo):
+    closed = []
+
+    async def scenario():
+        args = cleanup_args(closed)
+        await demo.cleanup(*args)
+        return args[0]
+
+    tasks = asyncio.run(scenario())
+    assert closed == ["mic", "waves", "session", "live"]
+    assert all(t.cancelled() for t in tasks)
+
+
+def test_cleanup_survives_cancellation(demo):
+    """A second Ctrl-C during cleanup still closes everything, then propagates."""
+    closed = []
+    gate = asyncio.Event()
+
+    async def scenario():
+        args = cleanup_args(closed, gate=gate)  # mic.stop blocks on the gate
+        cleanup = asyncio.create_task(demo.cleanup(*args))
+        await asyncio.sleep(0.05)  # cleanup is now suspended inside mic.stop
+        cleanup.cancel()           # the "second Ctrl-C"
+        gate.set()                 # unblock whoever still gets to run
+        with pytest.raises(asyncio.CancelledError):
+            await cleanup
+
+    asyncio.run(scenario())
+    assert closed == ["mic", "waves", "session", "live"]  # nothing skipped
+
+
+def test_cleanup_survives_cancellation_during_task_gather(demo):
+    """Same contract when the second Ctrl-C lands during the task gather."""
+    closed = []
+    gate = asyncio.Event()
+
+    async def slow_death():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await gate.wait()  # the task is slow to finish dying
+            raise
+
+    async def scenario():
+        _, mic, waves, session, display = cleanup_args(closed)
+        tasks = [asyncio.create_task(slow_death()) for _ in range(2)]
+        cleanup = asyncio.create_task(demo.cleanup(tasks, mic, waves, session, display))
+        await asyncio.sleep(0.05)  # cleanup is now suspended in the task gather
+        cleanup.cancel()           # the "second Ctrl-C"
+        gate.set()                 # let the tasks finish dying
+        with pytest.raises(asyncio.CancelledError):
+            await cleanup
+
+    asyncio.run(scenario())
+    assert closed == ["mic", "waves", "session", "live"]  # nothing skipped
+
+
+def test_describe_microphone_bounds_wpctl_wait(demo, monkeypatch, capsys):
+    """A hung wpctl must not block startup: terminate, reap, and continue."""
+    if not demo.USE_PIPEWIRE:
+        pytest.skip("wpctl path is Linux-only")
+
+    class HungProcess:
+        def __init__(self):
+            self.terminated = False
+            self.reaped = False
+
+        async def communicate(self):
+            await asyncio.sleep(3600)
+
+        def terminate(self):
+            self.terminated = True
+
+        async def wait(self):
+            self.reaped = True
+
+    process = HungProcess()
+
+    async def fake_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr(demo.asyncio, "create_subprocess_exec", fake_exec)
+    # The 5s wait is real: the timeout is hardcoded in the demo.
+    asyncio.run(demo.describe_microphone("auto"))
+    assert process.terminated and process.reaped
+    assert "Microphone source: auto" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Display.render: the single-line ANSI status
+# ---------------------------------------------------------------------------
+
+
+class FakeLive:
+    def __init__(self):
+        self.updates = []
+
+    def update(self, renderable, refresh=False):
+        self.updates.append(renderable)
+
+
+def rendered_text(display):
+    display.render()
+    status = display.live.updates[-1].renderables[1]
+    return status.plain
+
+
+def display_with(demo, **attrs):
+    d = demo.Display()
+    d.live = FakeLive()
+    for key, value in attrs.items():
+        setattr(d, key, value)
+    return d
+
+
+def test_render_shows_listening_before_a_verdict(demo):
+    text = rendered_text(display_with(demo, level=0.5, blocks=3))
+    assert "listening…" in text
+    assert "[3b]" in text
+
+
+def test_render_shows_cheese_verdict(demo):
+    verdict = {"talking": True, "kind": "brie", "feeling": "love", "score": 3.9, "p": 0.9}
+    text = rendered_text(display_with(demo, level=0.5, blocks=3, verdict=verdict, speaking=True))
+    assert "CHEESE" in text
+    assert "brie" in text
+    assert "you love it" in text
+    assert "❤️" in text
+    assert "3.9" in text
+
+
+def test_render_shows_score_levels(demo):
+    for feeling, score, emoji in [("love", 3.9, "❤️"), ("like", 3.1, "🙂"), ("dislike", 1.2, "🙁"), ("hate", 0.4, "🤮")]:
+        verdict = {"talking": True, "kind": "brie", "feeling": feeling, "score": score, "p": 0.9}
+        text = rendered_text(display_with(demo, level=0.5, blocks=3, verdict=verdict, speaking=True))
+        assert emoji in text, f"expected {emoji} for {feeling}"
+        assert f"{score:.1f}" in text
+
+
+def test_render_shows_not_cheese(demo):
+    verdict = {"talking": False}
+    text = rendered_text(display_with(demo, level=0.5, blocks=3, verdict=verdict, speaking=False))
+    assert "not cheese" in text
+
+
+def test_status_fields_stay_in_place_and_never_wrap(demo):
+    positions = []
+    for i, (kind, feeling) in enumerate([
+        ("brie", "love"), ("parmesan", "hate"), ("unknown type", "meh"),
+        ("mozzarella", "dislike"), ("feta", "like"),
+    ]):
+        d = display_with(
+            demo, level=0 if i == 0 else 0.5, blocks=10 ** i,
+            sense_state=["connecting", "waiting", "online", "stalled", "online"][i],
+            speaking=[None, True, False, True, False][i],
+            verdict={"talking": True, "kind": kind, "feeling": feeling, "score": 2.3, "p": 0.9},
+        )
+        text = rendered_text(d)
+        sentiment = "neutral sentiment" if feeling == "meh" else f"you {feeling} it"
+        positions.append(tuple(cell_len(text[:text.index(label)]) for label in
+                               ("🧀 CHEESE", kind, "(0.90)", sentiment, "(2.3)")))
+        for width in (80, 160):
+            output = io.StringIO()
+            Console(file=output, width=width).print(Group(*d.live.updates[-1].renderables[:2]))
+            lines = output.getvalue().splitlines()
+            assert len(lines) == 2
+            assert all(cell_len(line) <= width for line in lines)
+            assert "Sense cheese demo" in lines[0] and "●" in lines[0]
+            assert "●" not in lines[1]
+            if width == 160:
+                assert all(label in lines[1] for label in (kind, "(0.90)", sentiment, "(2.3)"))
+    assert all(position == positions[0] for position in positions)
+
+
+def test_render_shows_error_states(demo):
+    for state, expected in [("offline", "sense offline"), ("mic_error", "mic unavailable")]:
+        d = display_with(demo, sense_state=state)
+        text = rendered_text(d)
+        assert expected in d.live.updates[-1].renderables[0].plain
+        assert "stopped" in text
+
+
+def test_log_tail_appends_and_render_shows_it(demo):
+    d = demo.Display()
+    d.live = FakeLive()
+    handler = demo.LogTail(d)
+    handler.emit(logging.LogRecord("sense", logging.WARNING, "p", 1, "dial 1 refused", (), None))
+    assert list(d.log) == ["dial 1 refused"]
+    d.render()
+    texts = [r.plain for r in d.live.updates[-1].renderables]
+    assert "dial 1 refused" in texts[3]
+
+
+def test_log_tail_keeps_last_three_lines(demo):
+    d = demo.Display()
+    d.live = FakeLive()
+    handler = demo.LogTail(d)
+    for i in range(1, 5):
+        handler.emit(logging.LogRecord("sense", logging.WARNING, "p", 1, f"line {i}", (), None))
+    assert list(d.log) == ["line 2", "line 3", "line 4"]
+
+
+def test_render_keeps_header_then_results_then_diagnostics_and_log(demo):
+    d = display_with(demo, level=0.5, blocks=3)
+    d.diagnostic = "diagnostic"
+    d.log = deque(["line 1", "line 2"])
+    d.render()
+    texts = [r.plain for r in d.live.updates[-1].renderables]
+    assert "Sense cheese demo" in texts[0]
+    assert texts[1].startswith("  mic |")
+    assert texts[2:] == ["diagnostic", "line 1", "line 2"]

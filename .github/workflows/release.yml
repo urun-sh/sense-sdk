@@ -1,0 +1,448 @@
+name: release
+
+# Tag-triggered release for the public SDKs. The tag is the release decision:
+# publishing happens only for a v* tag whose version matches BOTH
+# python/pyproject.toml and typescript/package.json, after the release
+# candidate passes the clean-consumer gates. workflow_dispatch exists only to
+# re-run a failed publish from the same tag (dispatch from a branch fails the
+# version assertion).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    if: ${{ github.repository == 'urun-sh/sense-sdk' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.versions.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Assert the release tag matches both package versions
+        id: versions
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/tags/v*) version="${GITHUB_REF#refs/tags/v}" ;;
+            *)
+              echo "::error::release runs only from a v* tag ref (got ${GITHUB_REF}). For a re-run, dispatch this workflow from the tag."
+              exit 1
+              ;;
+          esac
+          py="$(python3 -c 'import tomllib; print(tomllib.load(open("python/pyproject.toml", "rb"))["project"]["version"])')"
+          ts="$(node -p 'require("./typescript/package.json").version')"
+          if [ "$version" != "$py" ]; then
+            echo "::error::tag v${version} does not match python/pyproject.toml version (${py}); fix the version and re-tag."
+            exit 1
+          fi
+          if [ "$version" != "$ts" ]; then
+            echo "::error::tag v${version} does not match typescript/package.json version (${ts}); fix the version and re-tag."
+            exit 1
+          fi
+          # python/ and typescript/ carry real-file LICENSE copies (hatchling
+          # and npm only embed files that exist inside their own directory).
+          # Fail hard if either copy has drifted from the canonical root LICENSE.
+          diff LICENSE python/LICENSE
+          diff LICENSE typescript/LICENSE
+          echo "Releasing urun-sense and @urun-sh/sense v${version}."
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  # Build the exact distributions that will be published and run the
+  # clean-consumer check against the built wheel. The publish job ships these
+  # artifacts — never a rebuild — so the gate result applies to the release.
+  python-gate:
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: false
+      - name: Build the release distributions (sdist + wheel)
+        run: uv build --project python
+      - name: Upload the distributions for the publish job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-dist
+          path: dist/urun_sense-*
+          if-no-files-found: error
+      - name: Install the wheel into a clean consumer outside the checkout
+        run: |
+          set -euo pipefail
+          CONSUMER="$RUNNER_TEMP/py-consumer"
+          mkdir -p "$CONSUMER/fixtures"
+          cp dist/urun_sense-*.whl "$RUNNER_TEMP/"
+          uv venv "$CONSUMER/.venv"
+          uv pip install --python "$CONSUMER/.venv/bin/python" \
+            "$RUNNER_TEMP"/urun_sense-*.whl aiohttp
+          cp "$GITHUB_WORKSPACE/conformance/python_consumer_check.py" "$CONSUMER/"
+          cp "$GITHUB_WORKSPACE"/conformance/fixtures/* "$CONSUMER/fixtures/"
+      - name: Run the clean-consumer check against the installed wheel
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/py-consumer"
+          .venv/bin/python python_consumer_check.py
+
+  # Build the exact npm tarball that will be published and run the
+  # clean-consumer checks against it.
+  ts-gate:
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: bun install --cwd typescript --frozen-lockfile
+      - name: Build the package (dist JS + rewritten d.ts)
+        run: cd typescript && npm run build
+      - name: Pack the tarball
+        run: cd typescript && npm pack --pack-destination "$RUNNER_TEMP"
+      - name: Upload the tarball for the publish job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-tarball
+          path: ${{ runner.temp }}/urun-sh-sense-*.tgz
+          if-no-files-found: error
+      - name: Install the tarball into a clean consumer outside the checkout
+        run: |
+          set -euo pipefail
+          CONSUMER="$RUNNER_TEMP/consumer"
+          mkdir -p "$CONSUMER"
+          cd "$CONSUMER"
+          npm init -y
+          npm install "$RUNNER_TEMP"/urun-sh-sense-*.tgz
+          cp "$GITHUB_WORKSPACE/conformance/consumer_check.mjs" .
+          cp "$GITHUB_WORKSPACE/conformance/consumer_typecheck.ts" .
+          cp -r "$GITHUB_WORKSPACE/conformance/fixtures" fixtures
+          node consumer_check.mjs
+      - name: Typecheck a consumer snippet against the installed declarations
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/consumer"
+          npm install --no-save typescript@5.9
+          ./node_modules/.bin/tsc --noEmit --strict --target esnext \
+            --module nodenext --moduleResolution nodenext consumer_typecheck.ts
+      # The bin shim must actually start the demo: an import-only shim exits
+      # silently with 0 (the 0.1.3 bug), and a banner alone does not prove the
+      # server bound (it prints before Bun.serve) — request the page itself.
+      # (Download to a file, not a pipe: with pipefail, `curl | grep -q`
+      # fails on curl's SIGPIPE when grep exits early on a match.)
+      # It must also refuse a /ws upgrade that lacks the per-run access token:
+      # the relay spends the operator's API key.
+      - name: Smoke-check the published bin starts the demo
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/consumer"
+          PORT=8999 ./node_modules/.bin/sense-cheese-demo > bin.out 2>&1 &
+          bin_pid=$!
+          trap 'kill $bin_pid 2>/dev/null || true' EXIT
+          ok=""
+          for _ in $(seq 1 20); do
+            if curl -fk --max-time 5 https://127.0.0.1:8999/ -o page.html 2>/dev/null && grep -q "<html" page.html; then
+              ok=1
+              break
+            fi
+            kill -0 $bin_pid 2>/dev/null || break
+            sleep 0.5
+          done
+          if [ -z "$ok" ]; then
+            kill $bin_pid 2>/dev/null || true
+            echo "bin never served the demo page; output:"; cat bin.out; exit 1
+          fi
+          echo "bin serves the demo page:"; head -3 page.html
+          # A fresh random handshake nonce (RFC 6455), not a credential.
+          ws_key="$(openssl rand -base64 16)"
+          status="$(curl -k --max-time 5 -o /dev/null -w '%{http_code}' \
+            -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+            -H "Sec-WebSocket-Key: ${ws_key}" -H 'Origin: https://127.0.0.1:8999' \
+            https://127.0.0.1:8999/ws)"
+          kill $bin_pid 2>/dev/null || true
+          if [ "$status" != "403" ]; then
+            echo "::error::/ws without the access token returned ${status}, expected 403"; exit 1
+          fi
+          echo "bin refuses an unauthenticated /ws upgrade (403)."
+
+  publish:
+    needs: [version, python-gate, ts-gate]
+    if: ${{ github.repository == 'urun-sh/sense-sdk' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # PyPI trusted publishing validates this environment name against the
+    # pending publisher configured on pypi.org; configure npm's trusted
+    # publisher with the same environment name.
+    environment: pypi
+    # The OIDC publishing token never shares a job with repository write
+    # access; the GitHub release is created by a separate job below.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download the distributions built by python-gate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: python-dist
+          merge-multiple: true
+          path: dist
+      - name: Download the tarball built by ts-gate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-tarball
+          path: npm-dist
+      - name: List distributions
+        run: |
+          ls -l dist/ npm-dist/
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: false
+      - name: Check package metadata
+        # twine 6.x rejects hatchling 1.33's Metadata-Version 2.5 (the v0.1.0
+        # publish died on "not a valid metadata version"); 7.0.0 accepts it.
+        run: uvx --from twine==7.0.0 twine check dist/urun_sense-*
+      # Re-running a failed publish from the same tag must not die on
+      # "version already exists" — each publish step checks its registry
+      # first and skips explicitly when the release is already served.
+      - name: Check whether PyPI already serves this release
+        id: pypi-state
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if curl -fsS -H 'Cache-Control: no-cache' "https://pypi.org/simple/urun-sense/" \
+              | grep -qF "urun_sense-${VERSION}.tar.gz"; then
+            echo "urun_sense-${VERSION} already on PyPI; skipping the publish step."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish to PyPI (trusted publishing)
+        if: ${{ steps.pypi-state.outputs.skip != 'true' }}
+        # SHA-pinned like every other action. The action pulls its prebuilt
+        # image tagged with this ref (ghcr.io/pypa/gh-action-pypi-publish:<sha>).
+        # v1.14.3 fixes GHSA-5xjx-3w67-w9x9 and ships twine 7.0.0 (Metadata 2.5).
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist/
+      # npm trusted publishing requires npm >= 11.5.1; Node 24 ships it.
+      # Provenance is decided per publish, from the repository's visibility.
+      - name: Set up Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - name: Check whether npm already serves this release
+        id: npm-state
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if npm view "@urun-sh/sense@${VERSION}" version >/dev/null 2>&1; then
+            echo "@urun-sh/sense@${VERSION} already on npm; skipping the publish step."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      # Provenance (the "built and signed on GitHub Actions" attestation that
+      # consumers verify with `npm audit signatures`) can only be produced by an
+      # npm publish from a source checkout — a pre-built tarball cannot be
+      # attested. So the publish job rebuilds here, and the verify job proves the
+      # *registry* artifact afterwards by installing it and re-running the
+      # conformance checks. Dependency lifecycle scripts are skipped so no
+      # third-party code executes in the job that holds the OIDC token.
+      - name: Check out the source for the provenance publish
+        if: ${{ steps.npm-state.outputs.skip != 'true' }}
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          # Checked out into a subdirectory: a root checkout cleans the workspace
+          # and deletes the distributions downloaded above.
+          path: src
+      - if: ${{ steps.npm-state.outputs.skip != 'true' }}
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - name: Install dependencies and build the package
+        if: ${{ steps.npm-state.outputs.skip != 'true' }}
+        run: |
+          set -euo pipefail
+          bun install --cwd src/typescript --frozen-lockfile --ignore-scripts
+          cd src/typescript && npm run build
+      - name: Publish to npm (trusted publishing)
+        if: ${{ steps.npm-state.outputs.skip != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # npm only attests public source repositories: publishing from a private
+          # checkout with provenance is a hard 422. So provenance is enabled exactly
+          # when the repository is public — flipping the repo public is the only
+          # change needed to start signing npm releases.
+          visibility="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .visibility)"
+          if [ "$visibility" = "public" ]; then
+            flags="--provenance"
+            echo "Source repository is public: publishing with provenance."
+          else
+            flags="--no-provenance"
+            echo "Source repository is ${visibility}: npm cannot attest it, publishing without provenance."
+          fi
+          cd src/typescript && npm publish "$flags" --access public
+
+  github-release:
+    needs: [version, publish]
+    if: ${{ github.repository == 'urun-sh/sense-sdk' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download the distributions built by python-gate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: python-dist
+          merge-multiple: true
+          path: dist
+      - name: Download the tarball built by ts-gate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-tarball
+          path: npm-dist
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # There is no checkout in this job, so gh must be told the
+          # repository explicitly instead of inferring it from a remote.
+          if gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release v${VERSION} already exists; skipping."
+          else
+            gh release create "v${VERSION}" dist/urun_sense-* npm-dist/urun-sh-sense-*.tgz \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "v${VERSION}" \
+              --generate-notes
+          fi
+
+  # A publish that reports success without the registries serving the version
+  # is a phantom publish. Verify against the real public artifacts from an
+  # empty environment: poll both registries, resolve through a cold uv cache,
+  # then install the published distributions into clean consumers and run the
+  # conformance checks against them.
+  verify:
+    needs: [version, publish]
+    if: ${{ github.repository == 'urun-sh/sense-sdk' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: false
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Verify PyPI simple index serves the release
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          echo "Polling https://pypi.org/simple/urun-sense/ for urun_sense-${VERSION} files..."
+          for attempt in $(seq 1 40); do
+            body="$(curl -fsS -H 'Cache-Control: no-cache' https://pypi.org/simple/urun-sense/ || true)"
+            missing=""
+            printf '%s' "$body" | grep -qF "urun_sense-${VERSION}.tar.gz" || missing="${missing} sdist"
+            printf '%s' "$body" | grep -qF "urun_sense-${VERSION}-py3-none-any.whl" || missing="${missing} wheel"
+            if [ -z "$missing" ]; then
+              echo "Simple index lists every urun_sense-${VERSION} distribution (attempt ${attempt})."
+              exit 0
+            fi
+            echo "Still missing:${missing} (attempt ${attempt})"
+            sleep 15
+          done
+          echo "::error::PyPI upload reported success but https://pypi.org/simple/urun-sense/ never listed every urun_sense-${VERSION} distribution within 10 minutes (last missing:${missing}) — phantom publish."
+          exit 1
+      - name: Verify npm registry serves the release
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          echo "Polling the npm registry for @urun-sh/sense@${VERSION}..."
+          for attempt in $(seq 1 20); do
+            if npm view "@urun-sh/sense@${VERSION}" version; then
+              echo "@urun-sh/sense@${VERSION} served by the npm registry (attempt ${attempt})."
+              exit 0
+            fi
+            echo "@urun-sh/sense@${VERSION} not yet visible (attempt ${attempt})"
+            sleep 30
+          done
+          echo "::error::npm publish reported success but the registry never served @urun-sh/sense@${VERSION} within 10 minutes — phantom publish."
+          exit 1
+      # The HTML simple index can propagate before the JSON variant uv
+      # resolves against (separate CDN cache entries), so the poll above
+      # passing does not guarantee uv sees the release yet — retry the
+      # resolution itself.
+      - name: Verify clean-cache resolution
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          for attempt in $(seq 1 20); do
+            if UV_CACHE_DIR="$(mktemp -d)" uvx --refresh --from "urun-sense==${VERSION}" python -c "import sense"; then
+              echo "urun-sense==${VERSION} resolved from a clean cache (attempt ${attempt})."
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::error::urun-sense==${VERSION} never resolved from a clean cache within 10 minutes of the simple index listing it."
+          exit 1
+      - name: Install the published wheel into a clean venv and run the conformance check
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          CONSUMER="$RUNNER_TEMP/py-consumer"
+          mkdir -p "$CONSUMER/fixtures"
+          uv venv "$CONSUMER/.venv"
+          uv pip install --python "$CONSUMER/.venv/bin/python" \
+            "urun-sense==${VERSION}" aiohttp
+          cp "$GITHUB_WORKSPACE/conformance/python_consumer_check.py" "$CONSUMER/"
+          cp "$GITHUB_WORKSPACE"/conformance/fixtures/* "$CONSUMER/fixtures/"
+          cd "$CONSUMER"
+          .venv/bin/python python_consumer_check.py
+      - name: Install the published npm package into a clean consumer and run the conformance check
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          CONSUMER="$RUNNER_TEMP/npm-consumer"
+          mkdir -p "$CONSUMER"
+          cd "$CONSUMER"
+          npm init -y
+          npm install "@urun-sh/sense@${VERSION}"
+          cp "$GITHUB_WORKSPACE/conformance/consumer_check.mjs" .
+          cp "$GITHUB_WORKSPACE/conformance/consumer_typecheck.ts" .
+          cp -r "$GITHUB_WORKSPACE/conformance/fixtures" fixtures
+          node consumer_check.mjs
+          npm install --no-save typescript@5.9
+          ./node_modules/.bin/tsc --noEmit --strict --target esnext \
+            --module nodenext --moduleResolution nodenext consumer_typecheck.ts

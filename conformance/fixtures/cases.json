@@ -1,0 +1,456 @@
+{
+ "note": "Predicate AST: nodes {and|or|not: {of}}, {truthy: {subject}}, {op: eq|ne|gt|gte|lt|lte, subject, value}, {between: {subject, enter, exit}}. Subjects: {type: question, id} = argmax value (noul -> bool, choice -> top option name; score: eq/ne compare the TOP LEVEL NAME, gt/gte/lt/lte compare the EXPECTED ORDINAL); {type: p, question, option?} = P(true) for noul else P(option); {type: top, question}; {type: value, question} = score expected ordinal; {type: p_at_least, question, level}. Expected arrays are per wave in waves.jsonl order (wave_id 0..7). between is stateful: true at >= enter, resets only below exit.",
+ "predicate_cases": [
+  {
+   "name": "bare_noul",
+   "predicate": {
+    "truthy": {
+     "subject": {
+      "type": "question",
+      "id": "finished"
+     }
+    }
+   },
+   "expected": [
+    false,
+    false,
+    true,
+    true,
+    false,
+    true,
+    false,
+    true
+   ]
+  },
+  {
+   "name": "and_bare_eq",
+   "predicate": {
+    "and": {
+     "of": [
+      {
+       "truthy": {
+        "subject": {
+         "type": "question",
+         "id": "finished"
+        }
+       }
+      },
+      {
+       "op": "eq",
+       "subject": {
+        "type": "question",
+        "id": "intent"
+       },
+       "value": "support"
+      }
+     ]
+    }
+   },
+   "expected": [
+    false,
+    false,
+    true,
+    true,
+    false,
+    true,
+    false,
+    true
+   ]
+  },
+  {
+   "name": "or_bare_top",
+   "predicate": {
+    "or": {
+     "of": [
+      {
+       "truthy": {
+        "subject": {
+         "type": "question",
+         "id": "finished"
+        }
+       }
+      },
+      {
+       "op": "eq",
+       "subject": {
+        "type": "top",
+        "question": "actions"
+       },
+       "value": "respond"
+      }
+     ]
+    }
+   },
+   "expected": [
+    false,
+    false,
+    true,
+    true,
+    false,
+    true,
+    true,
+    true
+   ]
+  },
+  {
+   "name": "not_bare",
+   "predicate": {
+    "not": {
+     "of": {
+      "truthy": {
+       "subject": {
+        "type": "question",
+        "id": "finished"
+       }
+      }
+     }
+    }
+   },
+   "expected": [
+    true,
+    true,
+    false,
+    false,
+    true,
+    false,
+    true,
+    false
+   ]
+  },
+  {
+   "name": "choice_eq",
+   "predicate": {
+    "op": "eq",
+    "subject": {
+     "type": "question",
+     "id": "intent"
+    },
+    "value": "support"
+   },
+   "expected": [
+    false,
+    false,
+    true,
+    true,
+    false,
+    true,
+    false,
+    true
+   ]
+  },
+  {
+   "name": "choice_ne",
+   "predicate": {
+    "op": "ne",
+    "subject": {
+     "type": "question",
+     "id": "intent"
+    },
+    "value": "support"
+   },
+   "expected": [
+    true,
+    true,
+    false,
+    false,
+    true,
+    false,
+    true,
+    false
+   ]
+  },
+  {
+   "name": "top_eq",
+   "predicate": {
+    "op": "eq",
+    "subject": {
+     "type": "top",
+     "question": "actions"
+    },
+    "value": "respond"
+   },
+   "expected": [
+    false,
+    false,
+    true,
+    true,
+    false,
+    false,
+    true,
+    true
+   ]
+  },
+  {
+   "name": "noul_p_gte",
+   "predicate": {
+    "op": "gte",
+    "subject": {
+     "type": "p",
+     "question": "finished"
+    },
+    "value": 0.8
+   },
+   "expected": [
+    false,
+    false,
+    true,
+    false,
+    false,
+    true,
+    false,
+    true
+   ]
+  },
+  {
+   "name": "noul_p_lt",
+   "predicate": {
+    "op": "lt",
+    "subject": {
+     "type": "p",
+     "question": "finished"
+    },
+    "value": 0.5
+   },
+   "expected": [
+    true,
+    false,
+    false,
+    false,
+    false,
+    false,
+    true,
+    false
+   ]
+  },
+  {
+   "name": "choice_p_gte",
+   "predicate": {
+    "op": "gte",
+    "subject": {
+     "type": "p",
+     "question": "intent",
+     "option": "support"
+    },
+    "value": 0.7
+   },
+   "expected": [
+    false,
+    false,
+    true,
+    true,
+    false,
+    true,
+    false,
+    true
+   ]
+  },
+  {
+   "name": "score_value_gte",
+   "predicate": {
+    "op": "gte",
+    "subject": {
+     "type": "value",
+     "question": "urgency"
+    },
+    "value": 1.5
+   },
+   "expected": [
+    false,
+    false,
+    false,
+    false,
+    false,
+    true,
+    false,
+    false
+   ]
+  },
+  {
+   "name": "score_p_at_least",
+   "predicate": {
+    "op": "gte",
+    "subject": {
+     "type": "p_at_least",
+     "question": "urgency",
+     "level": "medium"
+    },
+    "value": 0.6
+   },
+   "expected": [
+    false,
+    false,
+    true,
+    true,
+    false,
+    true,
+    false,
+    true
+   ]
+  },
+  {
+   "name": "score_top_eq",
+   "predicate": {
+    "op": "eq",
+    "subject": {
+     "type": "top",
+     "question": "urgency"
+    },
+    "value": "high"
+   },
+   "expected": [
+    false,
+    false,
+    false,
+    false,
+    false,
+    true,
+    false,
+    true
+   ]
+  },
+  {
+   "name": "score_top_eq_medium",
+   "predicate": {
+    "op": "eq",
+    "subject": {
+     "type": "top",
+     "question": "urgency"
+    },
+    "value": "medium"
+   },
+   "expected": [
+    false,
+    false,
+    true,
+    true,
+    false,
+    false,
+    false,
+    false
+   ]
+  },
+  {
+   "name": "combined_thresholds",
+   "predicate": {
+    "and": {
+     "of": [
+      {
+       "op": "eq",
+       "subject": {
+        "type": "question",
+        "id": "intent"
+       },
+       "value": "support"
+      },
+      {
+       "op": "gte",
+       "subject": {
+        "type": "p",
+        "question": "finished"
+       },
+       "value": 0.8
+      }
+     ]
+    }
+   },
+   "expected": [
+    false,
+    false,
+    true,
+    false,
+    false,
+    true,
+    false,
+    true
+   ]
+  },
+  {
+   "name": "score_bare_gte",
+   "predicate": {
+    "op": "gte",
+    "subject": {
+     "type": "question",
+     "id": "urgency"
+    },
+    "value": 1.0
+   },
+   "expected": [
+    false,
+    false,
+    false,
+    false,
+    false,
+    true,
+    false,
+    true
+   ]
+  },
+  {
+   "name": "score_bare_eq_top",
+   "predicate": {
+    "op": "eq",
+    "subject": {
+     "type": "question",
+     "id": "urgency"
+    },
+    "value": "high"
+   },
+   "expected": [
+    false,
+    false,
+    false,
+    false,
+    false,
+    true,
+    false,
+    true
+   ]
+  }
+ ],
+ "when_cases": [
+  {
+   "name": "edge_finished",
+   "predicate": {
+    "truthy": {
+     "subject": {
+      "type": "question",
+      "id": "finished"
+     }
+    }
+   },
+   "fires": [
+    2,
+    5,
+    7
+   ]
+  },
+  {
+   "name": "edge_hysteresis",
+   "predicate": {
+    "between": {
+     "subject": {
+      "type": "p",
+      "question": "finished"
+     },
+     "enter": 0.8,
+     "exit": 0.6
+    }
+   },
+   "fires": [
+    2,
+    5,
+    7
+   ],
+   "per_wave": [
+    false,
+    false,
+    true,
+    true,
+    false,
+    true,
+    false,
+    true
+   ]
+  }
+ ]
+}

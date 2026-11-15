@@ -1,0 +1,23 @@
+# Workspace root: makes `uv run python -c "import sense"` work from the repo
+# root. The actual package lives in python/ (src layout, aiohttp-only).
+[project]
+name = "sense-sdk"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["urun-sense[demo]"]
+
+[tool.uv.workspace]
+members = ["python"]
+
+[tool.uv.sources]
+urun-sense = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# Structural gate for the whole repo: pycodestyle errors, pyflakes, import
+# order, pyupgrade, bugbear, cyclomatic complexity (C901), and pylint's
+# structural rules. E501 is out: line length is style, not a defect.
+select = ["E", "F", "I", "UP", "B", "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915"]
+ignore = ["E501"]

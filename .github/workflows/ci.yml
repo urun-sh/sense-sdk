@@ -1,0 +1,143 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Lint (ruff complexity + style gate)
+        run: uvx ruff@0.16.7 check .
+      # The core SDK supports 3.10; the terminal demo uses Task.uncancel (3.11+).
+      - name: Core SDK on Python 3.10
+        if: matrix.python == '3.10'
+        run: uv run --locked --project python --extra quic --extra webrtc pytest python/tests conformance/python_runner.py --ignore=python/tests/test_cheese_demo.py -q
+      - name: Full SDK and demo suite
+        if: matrix.python != '3.10'
+        run: uv run --locked --project python --extra quic --extra webrtc pytest python/tests conformance/python_runner.py -q
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: bun install --cwd typescript --frozen-lockfile
+      - name: Build dist (the shipped examples import @urun-sh/sense)
+        run: cd typescript && npm run build
+      - name: Lint (oxlint complexity gate)
+        run: cd typescript && bunx oxlint@1.91.0
+      - run: cd typescript && bunx tsc --noEmit && bun test && bun test ../conformance/typescript_runner.ts
+  typescript-clean-consumer:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [22, 24]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: bun install --cwd typescript --frozen-lockfile
+      - name: Build the package (dist JS + rewritten d.ts)
+        run: cd typescript && npm run build
+      - name: Pack the tarball
+        run: cd typescript && npm pack --pack-destination "$RUNNER_TEMP"
+      - name: Install the tarball into a clean consumer outside the checkout
+        run: |
+          set -euo pipefail
+          CONSUMER="$RUNNER_TEMP/consumer"
+          mkdir -p "$CONSUMER"
+          cd "$CONSUMER"
+          npm init -y
+          npm install "$RUNNER_TEMP"/urun-sh-sense-*.tgz
+          cp "$GITHUB_WORKSPACE/conformance/consumer_check.mjs" .
+          cp "$GITHUB_WORKSPACE/conformance/consumer_typecheck.ts" .
+          cp -r "$GITHUB_WORKSPACE/conformance/fixtures" fixtures
+          node consumer_check.mjs
+      - name: Typecheck a consumer snippet against the installed declarations
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/consumer"
+          npm install --no-save typescript@5.9
+          ./node_modules/.bin/tsc --noEmit --strict --target esnext \
+            --module nodenext --moduleResolution nodenext consumer_typecheck.ts
+
+  duplication:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Duplication budget (jscpd, fail > 3% duplicated lines)
+        run: |
+          npx --yes jscpd@5.4.2 --min-tokens 50 --threshold 3 --reporters console \
+            --ignore "**/node_modules/**,**/dist/**,**/__pycache__/**" \
+            typescript/src python/src conformance
+
+  python-clean-consumer:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - name: Build the wheel
+        run: uv build --project python
+      - name: Install the wheel into a clean consumer outside the checkout
+        run: |
+          set -euo pipefail
+          CONSUMER="$RUNNER_TEMP/py-consumer"
+          mkdir -p "$CONSUMER/fixtures"
+          cp dist/urun_sense-*.whl "$RUNNER_TEMP/"
+          uv venv "$CONSUMER/.venv"
+          uv pip install --python "$CONSUMER/.venv/bin/python" \
+            "$RUNNER_TEMP"/urun_sense-*.whl aiohttp
+          cp "$GITHUB_WORKSPACE/conformance/python_consumer_check.py" "$CONSUMER/"
+          cp "$GITHUB_WORKSPACE"/conformance/fixtures/* "$CONSUMER/fixtures/"
+      - name: Run the clean-consumer check against the installed wheel
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/py-consumer"
+          .venv/bin/python python_consumer_check.py
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          # Full history: a secret deleted from the tree still ships in Git.
+          fetch-depth: 0
+      - name: Scan the source tree and full Git history for secrets
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.24.3
+          "$(go env GOPATH)/bin/gitleaks" dir --redact .
+          # -m: also scan merge diffs (a secret added during conflict resolution).
+          "$(go env GOPATH)/bin/gitleaks" git --redact --log-opts="--full-history --all -m" .

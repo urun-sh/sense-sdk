@@ -1,0 +1,19 @@
+# gitleaks config: default rules plus a narrow allowlist for historical
+# false positives. See https://github.com/gitleaks/gitleaks#configuration.
+[extend]
+useDefault = true
+
+# Commit 90656fe (pre-launch hardening) flagged two fixtures that were not
+# secrets; the tree was sanitized in a later commit, but the blobs remain in
+# full history, which the CI `secrets` job scans.
+# - .github/workflows/release.yml: the RFC 6455 sample WebSocket nonce
+#   ("the sample nonce") in a local smoke-test header.
+# - typescript/examples/cheese_demo.test.ts: a sequential placeholder token
+#   used by an offline test against a local fake server.
+[allowlist]
+description = "historical test fixtures in 90656fe, sanitized in-tree"
+commits = ["90656feb426a3b0ec182b69242e1e73f0d1cb91c"]
+paths = [
+  '''\.github/workflows/release\.ya?ml''',
+  '''typescript/examples/cheese_demo\.test\.ts''',
+]
