@@ -14,6 +14,7 @@ import inspect
 import json
 import logging
 import os
+import time
 import urllib.parse
 from collections import deque
 from collections.abc import AsyncIterator, Callable
@@ -81,6 +82,17 @@ RETRY_MAX_ATTEMPTS = 600
 MAX_PENDING_AUDIO_CHUNKS = 1500
 #: Text items held for the next send; the oldest is dropped beyond this.
 MAX_PENDING_TEXT_ITEMS = 256
+
+#: Explicit presence (owner GO 2026-11-16, hub-primary): the proxy holds a
+#: pooled seat only while the client says it is present. The signal is the
+#: ``{"type": "session.presence"}`` frame on the realtime lane, sent every
+#: ``PRESENCE_CADENCE_S`` while ``monotonic() - _last_activity`` is inside the
+#: idle window; an idle lapse stops the frames (an explicit detach — the
+#: runtime's #3439 governor then PARKS the seat, it never dies), and the next
+#: app-level send re-asserts it. A visible browser tab is NOT activity (owner
+#: ruling): only real app sends and ``keepalive()`` count.
+PRESENCE_IDLE_S = 60.0
+PRESENCE_CADENCE_S = 10.0
 
 __all__ = ["AudioInput", "Session", "SessionStats", "TextInput", "VideoInput"]
 
@@ -197,6 +209,9 @@ class Session:
         self.audio = AudioInput(self)
         self.video = VideoInput(self)
         self.text = TextInput(self)
+        #: Last app-level send (audio/video/text push, barge-in, keepalive).
+        #: A freshly created session is present until this lapses.
+        self._last_activity = time.monotonic()
 
     # -- registration ------------------------------------------------------
 
@@ -293,6 +308,7 @@ class Session:
     # -- outbound queues -----------------------------------------------------
 
     def _enqueue_audio(self, source: str, b64: str) -> None:
+        self._last_activity = time.monotonic()
         queue = self._audio.get(source)
         if queue is None:
             queue = self._audio[source] = deque(maxlen=MAX_PENDING_AUDIO_CHUNKS)
@@ -302,10 +318,12 @@ class Session:
         self._wake_up()
 
     def _enqueue_video(self, b64: str) -> None:
+        self._last_activity = time.monotonic()
         self._video.append(b64)
         self._wake_up()
 
     def _enqueue_text(self, text: str) -> None:
+        self._last_activity = time.monotonic()
         self._text_out.append(text)
         self._wake_up()
 
@@ -699,6 +717,7 @@ class Session:
         wire, loop = self._wire, self._loop
         if wire is None or wire.closed or loop is None or not loop.is_running():
             return
+        self._last_activity = time.monotonic()
         loop.create_task(self._send(wire, {"type": "response.cancel"}))
 
     # -- wave assembly --------------------------------------------------------
@@ -738,6 +757,7 @@ class Session:
         self._loop = asyncio.get_running_loop()
         pump = asyncio.create_task(self._pump_inputs(audio, video, text))
         sender = asyncio.create_task(self._sender())
+        presence = asyncio.create_task(self._presence_loop())
         try:
             while not self._closed:
                 self._turn_open = False
@@ -764,6 +784,7 @@ class Session:
         finally:
             pump.cancel()
             sender.cancel()
+            presence.cancel()
             self._wake = None
             try:
                 await pump
@@ -771,6 +792,10 @@ class Session:
                 pass
             try:
                 await sender
+            except (asyncio.CancelledError, Exception):
+                pass
+            try:
+                await presence
             except (asyncio.CancelledError, Exception):
                 pass
 
@@ -882,6 +907,23 @@ class Session:
 
     def _count_decision(self) -> None:
         self.stats.decisions += 1
+
+    def keepalive(self) -> None:
+        """App-level presence assertion: refreshes the activity window without
+        a media payload. Call this when the app is alive but sending nothing."""
+        self._last_activity = time.monotonic()
+
+    async def _presence_loop(self) -> None:
+        """Send ``{"type": "session.presence"}`` every cadence while the app is
+        active (inside the idle window); the idle lapse stops the frames."""
+        while not self._closed:
+            wire = self._wire
+            if wire is not None and not wire.closed and time.monotonic() - self._last_activity < PRESENCE_IDLE_S:
+                try:
+                    await self._send(wire, {"type": "session.presence"})
+                except Exception:
+                    pass  # a failed presence frame rides the next tick; the wire loop owns reconnects
+            await asyncio.sleep(PRESENCE_CADENCE_S)
 
     async def close(self) -> None:
         """Stop streams, tasks, session: cancel every tracked ctx task

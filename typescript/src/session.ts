@@ -19,6 +19,17 @@ const MAX_QUEUED_WAVES = 512;
  * the oldest is dropped beyond this (Python parity). */
 const MAX_PENDING_AUDIO_CHUNKS = 1500;
 
+/** Explicit presence (owner GO 2026-11-16, hub-primary): the proxy holds a
+ * pooled seat only while the client says it is present. The signal is the
+ * `{"type":"session.presence"}` frame on the realtime event channel, sent
+ * every PRESENCE_CADENCE_MS while `Date.now() - lastActivityAt` is inside
+ * the 60 s idle window; an idle lapse stops the frames (an explicit detach —
+ * the runtime's #3439 governor then PARKS the seat, it never dies), and the
+ * next app-level send re-asserts it. A visible browser tab is NOT activity
+ * (owner ruling): only real app sends and keepalive() count. */
+const PRESENCE_IDLE_MS = 60_000;
+const PRESENCE_CADENCE_MS = 10_000;
+
 /** Read an environment variable without referencing `process.env.NAME`
  * literally: bundlers that define-substitute that expression would inline the
  * build machine's secret into client bundles. Returns undefined off Node/Bun. */
@@ -142,6 +153,10 @@ export class Session {
   /** Set only for OutOfCreditsError terminal ends: run()/waves() throw it
    * instead of ending quietly (other fatal ends keep ending quietly). */
   private fatalErr: OutOfCreditsError | null = null;
+  /** Last app-level send (audio/video/text push, barge-in, setQuestions,
+   * keepalive). A freshly created session is present until this lapses. */
+  private lastActivityAt = Date.now();
+  private presenceTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: SessionOptions = {}) {
     this.apiKeyProvider = opts.apiKey ?? envVar("URUN_API_KEY") ?? "";
@@ -176,6 +191,7 @@ export class Session {
    * barges in FIRST: an envelope sent while a response is streaming wedges
    * the lane; cancel, then latch the new schema for the reopened turn. */
   setQuestions(questions: Question[]): void {
+    this.touch();
     this.registry = [];
     for (const q of questions) this.addQuestionRaw(q);
     this.bargeIn();
@@ -193,10 +209,41 @@ export class Session {
     return `${this.baseUrl.replace(/\/+$/, "")}/v1/realtime?model=${encodeURIComponent(this.model)}`;
   }
 
+  // ---- explicit presence --------------------------------------------------
+
+  /** Stamp app-level activity: every public send and keepalive() routes here. */
+  private touch(): void {
+    this.lastActivityAt = Date.now();
+  }
+
+  /** App-level presence assertion: refreshes the activity window without a
+   * media payload. Call this when the app is alive but sending nothing. */
+  keepalive(): void {
+    this.touch();
+  }
+
+  /** Start the 10 s presence cadence (once per session, across redials).
+   * A tick inside the idle window sends `{"type":"session.presence"}` on the
+   * event channel (every transport carries it — the same sendJson path as
+   * all app events); a lapsed window sends nothing. */
+  private startPresence(): void {
+    if (this.presenceTimer !== null || this.isClosed) return;
+    this.presenceTimer = setInterval(() => {
+      if (Date.now() - this.lastActivityAt < PRESENCE_IDLE_MS) this.sendJson({ type: "session.presence" });
+    }, PRESENCE_CADENCE_MS);
+  }
+
+  private stopPresence(): void {
+    if (this.presenceTimer === null) return;
+    clearInterval(this.presenceTimer);
+    this.presenceTimer = null;
+  }
+
   // ---- inputs -------------------------------------------------------------
 
   /** @internal */
   emitAudio(b64: string, source?: string): void {
+    this.touch();
     if (source !== undefined && source !== "default") {
       let queue = this.sourceQueues.get(source);
       if (!queue) {
@@ -245,6 +292,7 @@ export class Session {
 
   /** @internal */
   emitVideo(jpeg: Uint8Array): void {
+    this.touch();
     if (jpeg.byteLength > MAX_FRAME_BYTES) {
       throw new ProtocolError("frame_too_large", `frame ${jpeg.byteLength}B > ${MAX_FRAME_BYTES}B`);
     }
@@ -261,6 +309,7 @@ export class Session {
 
   /** @internal */
   emitText(text: string, mode: string): void {
+    this.touch();
     this.inputSinceTurn++;
     if (mode === "event") {
       this.oneShotText.push(text);
@@ -319,6 +368,7 @@ export class Session {
 
   /** Barge-in: stop the active turn's cadence. */
   bargeIn(): void {
+    this.touch();
     this.sendJson({ type: "response.cancel" });
     this.turnOpen = false;
   }
@@ -393,6 +443,7 @@ export class Session {
     });
     this.sendSessionUpdate();
     this.flushOrphanedAudio();
+    this.startPresence();
   }
 
   private onClose(code: number, reason?: string): void {
@@ -797,6 +848,7 @@ export class Session {
 
   async close(): Promise<void> {
     this.isClosed = true;
+    this.stopPresence();
     for (const w of this.waveWaiters.splice(0)) w(null);
     const wire = this.wire;
     this.wire = null;

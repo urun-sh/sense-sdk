@@ -874,3 +874,65 @@ describe("out of credits", () => {
     }
   });
 });
+
+describe("explicit presence", () => {
+  /** The session.presence frames a FakeWire was sent, exactly as they rode the wire. */
+  const presenceFrames = (w: { sent: unknown[] }): unknown[] =>
+    w.sent.filter((m) => hasType(m) && m.type === "session.presence");
+
+  test("sends session.presence every 10s while the app is active", async () => {
+    const wires: FakeWire[] = [];
+    const s = new Session({ apiKey: "k", questions: QUESTIONS, wireFactory: recordingFactory([], wires) });
+    vi.useFakeTimers();
+    try {
+      await s.connect();
+      vi.advanceTimersByTime(10_000);
+      expect(presenceFrames(wires[0]!)).toEqual([{ type: "session.presence" }]);
+      vi.advanceTimersByTime(20_000);
+      expect(presenceFrames(wires[0]!)).toHaveLength(3);
+      // An app-level send re-asserts presence (refreshes the activity window).
+      s.text.push("still here");
+      vi.advanceTimersByTime(30_000);
+      expect(presenceFrames(wires[0]!)).toHaveLength(6);
+      await s.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("idle past 60s lapses presence; keepalive() re-asserts it", async () => {
+    const wires: FakeWire[] = [];
+    const s = new Session({ apiKey: "k", questions: QUESTIONS, wireFactory: recordingFactory([], wires) });
+    vi.useFakeTimers();
+    try {
+      await s.connect();
+      vi.advanceTimersByTime(60_000);
+      const active = presenceFrames(wires[0]!).length;
+      expect(active).toBe(5); // ticks at 10..50s; at exactly 60s the window has lapsed (< is strict)
+      vi.advanceTimersByTime(30_000); // idle past the 60s window: no frames
+      expect(presenceFrames(wires[0]!)).toHaveLength(active);
+      s.keepalive(); // explicit re-assert
+      vi.advanceTimersByTime(10_000);
+      expect(presenceFrames(wires[0]!)).toHaveLength(active + 1);
+      await s.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("close() stops the presence cadence (no leaked timer)", async () => {
+    const wires: FakeWire[] = [];
+    const s = new Session({ apiKey: "k", questions: QUESTIONS, wireFactory: recordingFactory([], wires) });
+    vi.useFakeTimers();
+    try {
+      await s.connect();
+      vi.advanceTimersByTime(10_000);
+      expect(presenceFrames(wires[0]!)).toHaveLength(1);
+      await s.close();
+      vi.advanceTimersByTime(60_000);
+      expect(presenceFrames(wires[0]!)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

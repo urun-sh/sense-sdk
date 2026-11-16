@@ -959,3 +959,72 @@ def test_dial_402_is_out_of_credits():
             await runner.cleanup()
 
     asyncio.run(go())
+
+
+def test_explicit_presence_frames(monkeypatch):
+    """Explicit presence: the SDK sends {"type":"session.presence"} every 10 s
+    while the app is active (idle window 60 s), stops when the window lapses,
+    and keepalive() re-asserts. Cadence/idle shortened via module constants."""
+    import sense._session as sess_mod
+
+    monkeypatch.setattr(sess_mod, "PRESENCE_CADENCE_S", 0.05)
+    monkeypatch.setattr(sess_mod, "PRESENCE_IDLE_S", 0.4)
+
+    async def go():
+        state = {"types": []}
+
+        async def handler(request):
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            async for msg in ws:
+                if msg.type is not WSMsgType.TEXT:
+                    break
+                ev = json.loads(msg.data)
+                state["types"].append(ev["type"])
+                if ev["type"] == "session.update":
+                    await ws.send_json({"type": "error", "error": {"code": "empty_buffer"}})
+                elif ev["type"] == "response.create":
+                    await ws.send_json(
+                        {
+                            "type": "response.output_text.delta",
+                            "delta": dec("finished", 0, "true", {"true": 1.0, "false": 0.0}, 1.0) + "\n",
+                        }
+                    )
+                    await ws.send_json({"type": "response.completed"})
+
+        runner, port = await _start_fake(handler)
+        try:
+            s = Session(api_key="sk-test", base_url=f"http://127.0.0.1:{port}", hz=25.0)
+            _register(s)
+            got = []
+            task = asyncio.create_task(_consume(s, got))
+
+            async def presences():
+                return state["types"].count("session.presence")
+
+            # App activity keeps the window open: frames flow every cadence.
+            s.text.push("still here")
+            await _wait_until(lambda: state["types"].count("session.presence") >= 2)
+            # The wire frame is exactly the presence marker, no extra fields.
+            s.keepalive()
+            await _wait_until(lambda: state["types"].count("session.presence") >= 3)
+            # Idle past the window: the cadence goes quiet (explicit detach).
+            # Baseline only once the cadence has stopped ticking (the 0.4 s
+            # window from the keepalive has lapsed) — a mid-cadence count
+            # would race the next frame.
+            prev = -1
+            while state["types"].count("session.presence") != prev:
+                prev = state["types"].count("session.presence")
+                await asyncio.sleep(0.1)
+            n = prev
+            await asyncio.sleep(0.7)
+            assert state["types"].count("session.presence") == n
+            # A fresh app send re-asserts presence.
+            s.text.push("back")
+            await _wait_until(lambda: state["types"].count("session.presence") >= n + 1)
+            task.cancel()
+            await s.close()
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(go())
