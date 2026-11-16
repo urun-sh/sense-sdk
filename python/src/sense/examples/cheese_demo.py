@@ -4,7 +4,7 @@
     cd sense-sdk
     uv build --project python -o dist
     uv venv --python 3.11
-    uv pip install --python .venv/bin/python "dist/urun_sense-0.1.0-py3-none-any.whl[demo]"
+    uv pip install --python .venv/bin/python "$(ls dist/urun_sense-*.whl)[demo]"
     URUN_API_KEY="<urun-key>" .venv/bin/python python/src/sense/examples/cheese_demo.py
 
 Linux mic: PipeWire (pw-record, pw-dump, wpctl).

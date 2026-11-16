@@ -30,10 +30,10 @@ Examples stream the audio, video, and text you supply to the configured Sense se
 
 #### Python (standalone terminal demo):
 
-Clone the `sense-sdk` repository and install [uv](https://docs.astral.sh/uv/). Run the following command in the sense-sdk repo root:
+The demo is in the urun-sense PyPi package, run the following command:
 
 ```bash
-uv run --with "sounddevice>=0.5" python/src/sense/examples/cheese_demo.py
+python -m sense.examples.cheese_demo
 ```
 
 Wait for the connection, select your mic, and start talking to Sense.
