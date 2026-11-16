@@ -5,9 +5,12 @@ dist/
 .venv/
 *.pyc
 .pytest_cache/
-# Staged by `npm run build` from ../python/src/sense/examples/assets/ — the
-# single committed copy of the sample wav lives in the Python package tree.
-typescript/examples/assets/
+# Staged at build time from the committed source at the repo root: the
+# TypeScript build (typescript/scripts/stage-assets.mjs) copies it into
+# typescript/examples/, the Python hook (python/hatch_build.py) into
+# python/src/sense/examples/. Only the repo-root examples/ copies are tracked.
+typescript/examples/
+python/src/sense/examples/
 
 # Local credentials; templates may be committed with placeholder values only.
 .env

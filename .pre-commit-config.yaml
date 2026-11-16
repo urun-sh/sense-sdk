@@ -16,18 +16,19 @@ repos:
         entry: bash -c 'cd typescript && if command -v bun >/dev/null 2>&1; then exec bunx oxlint@1.91.0; else exec npx --yes oxlint@1.91.0; fi'
         language: system
         pass_filenames: false
-        files: '^typescript/.+\.(ts|tsx|mjs|js)$'
+        files: '^typescript/.+\.(ts|tsx|mjs|js)$|^examples/typescript/.+\.(ts|tsx)$'
         stages: [pre-commit]
       # bun is required here (the lockfile and @types/bun come from its
       # install); node_modules is installed automatically on first run.
-      # dist is built first — the same two steps as `npm run build`, run
-      # bun-natively so a Bun-only machine without npm can still commit:
-      # tsconfig typechecks typescript/examples, whose demo imports
+      # dist and the staged examples are built first — the same steps as
+      # `npm run build`, run bun-natively so a Bun-only machine without
+      # npm can still commit: tsconfig typechecks typescript/examples
+      # (staged from ../examples/typescript), whose demo imports
       # @urun-sh/sense (resolves to dist declarations).
       - id: typecheck
         name: tsc --noEmit (typescript)
-        entry: bash -c 'cd typescript && bun install --frozen-lockfile && bunx tsc -p tsconfig.build.json && bun scripts/fix-dts.mjs && exec bunx tsc --noEmit'
+        entry: bash -c 'cd typescript && bun install --frozen-lockfile && bunx tsc -p tsconfig.build.json && bun scripts/fix-dts.mjs && bun scripts/stage-assets.mjs && exec bunx tsc --noEmit'
         language: system
         pass_filenames: false
-        files: '^typescript/.+\.(ts|tsx|mjs|js)$|^typescript/(tsconfig[^/]*\.json|package\.json)$'
+        files: '^typescript/.+\.(ts|tsx|mjs|js)$|^typescript/(tsconfig[^/]*\.json|package\.json)$|^examples/typescript/.+\.(ts|tsx)$'
         stages: [pre-commit]

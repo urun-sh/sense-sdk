@@ -151,6 +151,6 @@ Beyond this example, the SDK also has predicates + `app.when(pred, handler)` for
 
 ### Full example code
 
-  - [typescript/examples/cheese_demo.ts](https://github.com/urun-sh/sense-sdk/blob/main/typescript/examples/cheese_demo.ts)
+  - [examples/typescript/cheese_demo.ts](https://github.com/urun-sh/sense-sdk/blob/main/examples/typescript/cheese_demo.ts)
 
 The separate `voice_agent` example illustrates predicate-driven control flow; its reply and tool execution are stubs, not a complete assistant. Its bundled speech sample and additional text input are separate demonstration inputs, not matching transcripts.

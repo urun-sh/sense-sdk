@@ -144,6 +144,6 @@ Beyond this example, the SDK also has `app.predicate(fn)` + `app.when(pred, hand
 
 ### Full example code
 
-  - [python/src/sense/examples/cheese_demo.py](https://github.com/urun-sh/sense-sdk/blob/main/python/src/sense/examples/cheese_demo.py)
+  - [examples/python/cheese_demo.py](https://github.com/urun-sh/sense-sdk/blob/main/examples/python/cheese_demo.py)
 
 The separate `voice_agent` example illustrates predicate-driven control flow; its reply and tool execution are stubs, not a complete assistant. Its bundled speech sample and additional text input are separate demonstration inputs, not matching transcripts.

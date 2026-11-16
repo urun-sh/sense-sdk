@@ -5,7 +5,7 @@
     uv build --project python -o dist
     uv venv --python 3.11
     uv pip install --python .venv/bin/python "$(ls dist/urun_sense-*.whl)[demo]"
-    URUN_API_KEY="<urun-key>" .venv/bin/python python/src/sense/examples/cheese_demo.py
+    URUN_API_KEY="<urun-key>" .venv/bin/python examples/python/cheese_demo.py
 
 Linux mic: PipeWire (pw-record, pw-dump, wpctl).
 """
@@ -25,7 +25,6 @@ from contextlib import suppress
 from rich.console import Group
 from rich.live import Live
 from rich.text import Text
-
 from sense import Sense, SenseUnavailable
 
 SAMPLE_RATE = 24000   # the SDK speaks 24 kHz PCM16 mono
