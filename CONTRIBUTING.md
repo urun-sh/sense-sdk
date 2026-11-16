@@ -46,7 +46,7 @@ For wire or lifecycle changes, consult [the protocol reference](docs/protocol.md
 and test both language implementations. Document intentional differences.
 
 Build outputs are generated, not edited. The sample WAV has one tracked copy
-in the Python package; the TypeScript build stages it. Packaging changes must
+at `examples/assets/`; both package builds stage it. Packaging changes must
 pass the clean-consumer checks in CI. Keep all three license copies identical.
 The release workflow publishes on `v*` tags; do not create release tags as part
 of a contribution.
