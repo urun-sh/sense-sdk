@@ -21,7 +21,7 @@
 
 ## Packaging and documentation
 
-- Edit source files, not `typescript/dist/`. The build rewrites declaration imports and copies the sample audio from `python/src/sense/examples/assets/` into `typescript/examples/assets/`; keep only the Python copy tracked.
+- Edit the source files at `examples/{python,typescript,assets}`, not `typescript/dist/` and not the staged copies: the Python build hook (`python/hatch_build.py`) stages the repo-root examples into `python/src/sense/examples/`, and `npm run build` (`typescript/scripts/stage-assets.mjs`) stages them into `typescript/examples/`. Both staged trees are gitignored.
 - Keep the root README and both package READMEs consistent when changing public examples or requirements.
 - Keep `LICENSE`, `python/LICENSE`, and `typescript/LICENSE` identical. Both published packages need their own license copy.
 - For a release, keep the Python and TypeScript package versions and applicable lockfiles consistent. The `v*` tag workflow publishes to PyPI and npm; creating or pushing a release tag is a publishing action.

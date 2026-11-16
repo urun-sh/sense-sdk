@@ -56,10 +56,10 @@ Examples stream the audio, video, and text you supply to the configured Sense se
 
 #### Python (standalone terminal demo):
 
-Clone the `sense-sdk` repository and install [uv](https://docs.astral.sh/uv/). Run the following command in the sense-sdk repo root:
+The demo is in the urun-sense PyPi package, run the following command:
 
 ```bash
-uv run --with "sounddevice>=0.5" python/src/sense/examples/cheese_demo.py
+python -m sense.examples.cheese_demo
 ```
 
 Wait for the connection, select your mic, and start talking to Sense.
@@ -283,8 +283,8 @@ try {
 Beyond this example, the SDK also has predicates + `app.when(pred, handler)` for edge-triggered handlers, and `app.onWave(handler)` to observe every completed wave. Refer to the [Sense reference](https://docs.urun.sh/docs/sense/reference?facet=session) for details.
 
 ### Full example code
-  - [python](python/src/sense/examples/cheese_demo.py)
-  - [typescript](typescript/examples/cheese_demo.ts)
+  - [python](examples/python/cheese_demo.py)
+  - [typescript](examples/typescript/cheese_demo.ts)
 
 The separate `voice_agent` examples illustrate predicate-driven control flow; their reply and tool execution are stubs, not a complete assistant. Their bundled speech sample and additional text input are separate demonstration inputs, not matching transcripts.
 
