@@ -18,7 +18,7 @@ import pytest
 from rich.cells import cell_len
 from rich.console import Console, Group
 
-DEMO_PATH = pathlib.Path(__file__).resolve().parents[1] / "src" / "sense" / "examples" / "cheese_demo.py"
+DEMO_PATH = pathlib.Path(__file__).resolve().parents[2] / "examples" / "python" / "cheese_demo.py"
 
 
 @pytest.fixture(scope="module")

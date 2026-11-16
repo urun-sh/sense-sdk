@@ -6,7 +6,7 @@
  *   cd sense-sdk/typescript
  *   bun install && bun run build
  *   URUN_API_KEY="<urun-key>" bun examples/cheese_demo.ts          # this machine only
- *   URUN_API_KEY="<urun-key>" bun examples/cheese_demo.ts --lan    # also phones on your network
+ *   URUN_API_KEY="<urun-key>" bun examples/cheese_demo.ts --lan    # other devices on your network
  *
  * Open the printed URL: it carries a per-run access token in its #fragment.
  * The relay spends the operator's API key, so /ws requires that token, a
