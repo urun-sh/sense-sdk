@@ -9,6 +9,8 @@ export type { QuestionKind, QuestionInit } from "./question.ts";
 export { Predicate, opsFor } from "./predicate.ts";
 export type { Op, Ops, Subject } from "./predicate.ts";
 export { Wave, Result, Score } from "./wave.ts";
+export { attachStream } from "./attach.ts";
+export type { AttachStream, AttachTarget, AttachHandle, AttachOptions } from "./attach.ts";
 export { Context } from "./context.ts";
 export type { WaveHandler } from "./context.ts";
 export { ProtocolError, OutOfCreditsError } from "./errors.ts";

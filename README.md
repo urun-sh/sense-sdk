@@ -153,6 +153,8 @@ await asyncio.gather(*tasks)
 
 `session.run()` can also take audio/video/text iterators directly and pump them for you; this example pushes audio manually to keep the mic and the level meter in step.
 
+**Where does a live mic come from (Python)?** There is no capture built into the core SDK — keep it dependency-free. The server-side path is exactly the loop above: produce PCM16 mono 24 kHz chunks yourself (read a WAV, or use whatever capture library your app already has — e.g. a `sounddevice` raw stream at 24 kHz) and `session.audio.push(chunk)` each one. For a browser mic with zero plumbing, use the TypeScript SDK's one-liner: `session.attach(await navigator.mediaDevices.getUserMedia({ audio: true }))`.
+
 **Read decisions off each wave.** Every answered question `id` has a `result` with a `.value`, and a confidence/probability `.p`. Additionally:
 - Choices return confidences for each option in `.p_option(name)`(normalized so they form a discrete probability distribution).
 - Scores return:
@@ -246,6 +248,14 @@ async function readWaves(): Promise<void> {
         ...
     }
 }
+```
+
+**Live mic in one line (browser).** `session.attach(stream)` takes a browser MediaStream and does the capture for you — audio is resampled to PCM16 24 kHz mono and pushed in 40 ms chunks, video frames are sampled to JPEG at the session cadence:
+
+```ts
+const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true }); // audio-only streams work too
+const attached = await session.attach(stream); // resamples + pushes continuously; returns a handle with stop()
+// later: attached.stop() — stops the pumping; the stream's tracks stay yours to stop
 ```
 
 **Feed it audio concurrently.** The SDK currently speaks 24 kHz PCM16 mono in 40 ms chunks. The audio push and the wave consumption must run at the same time — a blocking wave loop starves the audio — so we run them as concurrent tasks:

@@ -7,6 +7,7 @@ import { Wave, type Result } from "./wave.ts";
 import { Context, type WaveHandler } from "./context.ts";
 import type { Predicate } from "./predicate.ts";
 import { OutOfCreditsError, ProtocolError, errMessage } from "./errors.ts";
+import { attachStream, type AttachHandle, type AttachOptions, type AttachStream } from "./attach.ts";
 
 const MAX_FRAME_BYTES = 256_000;
 const TURN_TOKEN_BUDGET = 250_000;
@@ -844,6 +845,14 @@ export class Session {
    * another callback. */
   onWave(handler: WaveHandler, opts: { coalesce?: boolean } = {}): { cancel(): void } {
     return this.context.onWave(handler, opts);
+  }
+
+  /** Browser-only one-liner: stream a live MediaStream (mic and/or camera)
+   * into the session. Audio is resampled to PCM16 24 kHz mono and pushed in
+   * 40 ms chunks; video is sampled to JPEG at the session cadence. Returns a
+   * handle with stop(); the stream's tracks stay owned by the caller. */
+  attach(stream: AttachStream, opts?: AttachOptions): Promise<AttachHandle> {
+    return attachStream(this, stream, opts);
   }
 
   async close(): Promise<void> {

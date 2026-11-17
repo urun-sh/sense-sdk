@@ -105,6 +105,14 @@ async function readWaves(): Promise<void> {
 }
 ```
 
+**Live mic in one line (browser).** `session.attach(stream)` takes a browser MediaStream and does the capture for you — audio is resampled to PCM16 24 kHz mono and pushed in 40 ms chunks, video frames are sampled to JPEG at the session cadence:
+
+```ts
+const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true }); // audio-only streams work too
+const attached = await session.attach(stream); // resamples + pushes continuously; returns a handle with stop()
+// later: attached.stop() — stops the pumping; the stream's tracks stay yours to stop
+```
+
 **Feed it audio concurrently.** The SDK currently speaks 24 kHz PCM16 mono in 40 ms chunks. The audio push and the wave consumption must run at the same time — a blocking wave loop starves the audio — so we run them as concurrent tasks:
 
 ```ts
