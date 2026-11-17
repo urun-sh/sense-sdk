@@ -2,7 +2,6 @@
 alongside the existing string[]/pair forms (no breaking change)."""
 
 import pytest
-
 from sense import Question, QuestionKind, Sense
 
 
