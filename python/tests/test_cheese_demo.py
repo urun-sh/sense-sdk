@@ -144,6 +144,65 @@ def test_error_state_maps_exception_types(demo):
     assert demo.error_state(RuntimeError("boom")) == "error"
 
 
+class FakeSounddevice:
+    """Just enough PortAudio surface for MicStream.start to fail at stream open."""
+
+    class PortAudioError(Exception):
+        pass
+
+    @staticmethod
+    def query_devices(device, kind):
+        return {"hostapi": 0}
+
+    @staticmethod
+    def query_hostapis(index):
+        return {"name": "Core Audio"}
+
+    @staticmethod
+    def RawInputStream(**kwargs):
+        raise FakeSounddevice.PortAudioError(
+            "Error opening RawInputStream: Internal PortAudio error [PaErrorCode -9986]"
+        )
+
+
+def test_mic_start_failure_hints_macos_permissions(demo, monkeypatch):
+    monkeypatch.setattr(demo, "USE_PIPEWIRE", False)
+    monkeypatch.setattr(demo, "portable_audio", lambda: FakeSounddevice)
+    mic = demo.MicStream(SimpleNamespace(), "auto")
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    with pytest.raises(demo.MicrophoneError) as excinfo:
+        asyncio.run(mic.start())
+    assert "Privacy & Security → Microphone" in str(excinfo.value)
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(demo.MicrophoneError) as excinfo:
+        asyncio.run(mic.start())
+    assert "Privacy" not in str(excinfo.value)
+
+
+def test_finished_callback_returns_none(demo, monkeypatch):
+    """cffi declares the PortAudio finished callback void: a return value makes
+    PortAudio print 'callback ... must return None' when the stream ends."""
+    captured = {}
+
+    class RecordingSounddevice(FakeSounddevice):
+        @staticmethod
+        def RawInputStream(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(start=lambda: None)
+
+    monkeypatch.setattr(demo, "USE_PIPEWIRE", False)
+    monkeypatch.setattr(demo, "portable_audio", lambda: RecordingSounddevice)
+    mic = demo.MicStream(SimpleNamespace(), "auto")
+
+    async def start_and_fire():
+        await mic.start()
+        assert captured["finished_callback"]() is None
+
+    asyncio.run(start_and_fire())
+
+
 # ---------------------------------------------------------------------------
 # cleanup: survives a second Ctrl-C, closes everything either way
 # ---------------------------------------------------------------------------

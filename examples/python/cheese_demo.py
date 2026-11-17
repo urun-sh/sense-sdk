@@ -351,6 +351,16 @@ def portable_audio():
         ) from exc
 
 
+def mic_permission_hint():
+    """Some platforms, such as macOS, require per-app permission for
+    microphone use but surface a denial as a generic capture-start error,
+    so name the likely fix when starting capture fails on one of them."""
+    if sys.platform != "darwin":
+        return ""
+    return (" Also allow microphone access for your terminal app: "
+            "System Settings → Privacy & Security → Microphone, then restart the terminal.")
+
+
 class MicStream:
     """Capture mono PCM16 at 24 kHz; platform code stays out of the Sense demo."""
 
@@ -372,17 +382,23 @@ class MicStream:
                 item = MicrophoneError(f"Microphone capture failed: {status}") if status else bytes(data)
                 loop.call_soon_threadsafe(self.queue.put_nowait, item)
 
+            def on_finished():
+                # The finished callback must return None (cffi void): returning
+                # call_soon_threadsafe's handle makes PortAudio print
+                # "callback with the return type 'void' must return None".
+                loop.call_soon_threadsafe(self.queue.put_nowait, None)
+
             try:
                 host = sd.query_hostapis(sd.query_devices(device, "input")["hostapi"])["name"]
                 settings = sd.WasapiSettings(auto_convert=True) if host == "Windows WASAPI" else None
                 self.stream = sd.RawInputStream(
                     device=device, samplerate=SAMPLE_RATE, channels=1, dtype="int16",
                     blocksize=BLOCKSIZE, extra_settings=settings, callback=on_audio,
-                    finished_callback=lambda: loop.call_soon_threadsafe(self.queue.put_nowait, None),
+                    finished_callback=on_finished,
                 )
                 self.stream.start()
             except (sd.PortAudioError, ValueError) as exc:
-                raise MicrophoneError(f"Microphone recorder could not start: {exc}") from exc
+                raise MicrophoneError(f"Microphone could not start: {exc}{mic_permission_hint()}") from exc
             return
         try:
             self.process = await asyncio.create_subprocess_exec(
@@ -391,7 +407,7 @@ class MicStream:
                 stdout=asyncio.subprocess.PIPE, start_new_session=True,
             )
         except OSError as exc:
-            raise MicrophoneError(f"Microphone recorder could not start: {exc}") from exc
+            raise MicrophoneError(f"Microphone could not start: {exc}") from exc
 
     async def chunks(self):
         while True:
@@ -403,9 +419,9 @@ class MicStream:
             except asyncio.TimeoutError as exc:
                 raise MicrophoneError("Mic delivered no audio for 5s; try --device with another source.") from exc
             except asyncio.IncompleteReadError as exc:
-                raise MicrophoneError("Microphone recorder exited; check the selected source.") from exc
+                raise MicrophoneError("Microphone stopped; check the selected source.") from exc
             if chunk is None:
-                raise MicrophoneError("Microphone recorder exited; check the selected source.")
+                raise MicrophoneError("Microphone stopped; check the selected source.")
             if isinstance(chunk, MicrophoneError):
                 raise chunk
             self.display.blocks += 1
