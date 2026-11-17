@@ -343,11 +343,12 @@ def portable_audio():
 
 
 def mic_permission_hint():
-    """macOS surfaces a microphone-permission denial only as a generic PortAudio
-    error, so name the likely fix wherever capture fails on a Mac."""
+    """Some platforms, such as macOS, require per-app permission for
+    microphone use but surface a denial only as a generic capture error,
+    so name the likely fix wherever capture fails on one of them."""
     if sys.platform != "darwin":
         return ""
-    return (" On macOS, also allow microphone access for your terminal app: "
+    return (" Also allow microphone access for your terminal app: "
             "System Settings → Privacy & Security → Microphone, then restart the terminal.")
 
 
@@ -388,7 +389,7 @@ class MicStream:
                 )
                 self.stream.start()
             except (sd.PortAudioError, ValueError) as exc:
-                raise MicrophoneError(f"Microphone recorder could not start: {exc}{mic_permission_hint()}") from exc
+                raise MicrophoneError(f"Microphone could not start: {exc}{mic_permission_hint()}") from exc
             return
         try:
             self.process = await asyncio.create_subprocess_exec(
@@ -397,7 +398,7 @@ class MicStream:
                 stdout=asyncio.subprocess.PIPE, start_new_session=True,
             )
         except OSError as exc:
-            raise MicrophoneError(f"Microphone recorder could not start: {exc}") from exc
+            raise MicrophoneError(f"Microphone could not start: {exc}") from exc
 
     async def chunks(self):
         while True:
@@ -411,9 +412,9 @@ class MicStream:
                     f"Mic delivered no audio for 5s; try --device with another source.{mic_permission_hint()}"
                 ) from exc
             except asyncio.IncompleteReadError as exc:
-                raise MicrophoneError("Microphone recorder exited; check the selected source.") from exc
+                raise MicrophoneError("Microphone stopped; check the selected source.") from exc
             if chunk is None:
-                raise MicrophoneError("Microphone recorder exited; check the selected source.")
+                raise MicrophoneError("Microphone stopped; check the selected source.")
             if isinstance(chunk, MicrophoneError):
                 raise chunk
             self.display.blocks += 1
