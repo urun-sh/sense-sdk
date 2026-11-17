@@ -258,6 +258,24 @@ const attached = await session.attach(stream); // resamples + pushes continuousl
 // later: attached.stop() — stops the pumping; the stream's tracks stay yours to stop
 ```
 
+**Browser quickstart (no relay).** Your server keeps the org API key and mints a 10-minute client secret; the browser dials `inference.urun.sh` directly — the dial route (`POST /v1/realtime/calls`) is CORS-open for bearer auth, and the WebTransport/WebRTC media leg needs no relay. A runnable minting server is at [examples/typescript/mint_server.ts](https://github.com/urun-sh/sense-sdk/blob/main/examples/typescript/mint_server.ts):
+
+```ts
+// server: POST https://inference.urun.sh/v1/realtime/client_secrets with
+// `Authorization: Bearer $URUN_API_KEY` → { value: "ek_…", expires_at }
+
+// browser: the SDK re-resolves a fresh secret per dial/redial
+const app = new Sense({
+    apiKey: async () => {
+        const { value } = (await (await fetch("/client-secret", { method: "POST" })).json()) as { value: string };
+        return value; // a fresh 10-minute client secret, org key never leaves the server
+    },
+});
+const session = app.session();
+const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+const attached = await session.attach(stream); // the one-liner above, now unattended
+```
+
 **Feed it audio concurrently.** The SDK currently speaks 24 kHz PCM16 mono in 40 ms chunks. The audio push and the wave consumption must run at the same time — a blocking wave loop starves the audio — so we run them as concurrent tasks:
 
 ```ts
