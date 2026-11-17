@@ -60,23 +60,32 @@ const speech = app.noul("Is someone speaking right now?", { id: "speech" });
 const cheese = app.noul("Is the speaker talking about cheese right now?", { id: "cheese" });
 ```
 
-The model can also answer non-binary questions from a list of choices — given a `choice` Sense matches from a fixed option list:
+The model can also answer non-binary questions from a list of choices — given a `choice` Sense matches from a fixed option list. Options can carry a short description each (a Jev-style `criteria` map — name → description, insertion order preserved); bare name lists work too:
 
 ```ts
 const kind = app.choice(
     "Which type of cheese are they talking about?",
-    ["cheddar", "brie", "gouda", "parmesan", "camembert",
-     "mozzarella", "blue", "feta", "other"],
+    {
+        cheddar: "Firm yellow cheese",
+        brie: "Soft white-rind cheese",
+        gouda: "Semi-hard Dutch cheese",
+        parmesan: "Hard aged grating cheese",
+        camembert: "Soft bloomy-rind cheese",
+        mozzarella: "Stretchy fresh cheese",
+        blue: "Veined blue cheese",
+        feta: "Crumbly brined cheese",
+        other: "Any other kind of cheese",
+    },
     { id: "cheese_type" },
 );
 ```
 
-If you want an ordered scale use a `score` — the grades or levels are the range of answers, in this case the user's feeling will be graded in the range (0..4):
+If you want an ordered scale use a `score` — the grades or levels are the range of answers, in this case the user's feeling will be graded in the range (0..4). Levels may be a name → description map (insertion order is the ordinal order) or a bare name list:
 
 ```ts
 const feeling = app.score(
     "How does the speaker feel about that cheese?",
-    ["hate", "dislike", "meh", "like", "love"],
+    { hate: "Disgusted", dislike: "Negative", meh: "Neutral", like: "Positive", love: "Delighted" },
     { id: "feeling" },
 );
 ```

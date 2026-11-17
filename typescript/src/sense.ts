@@ -51,17 +51,20 @@ export class Sense {
    * natural-language question is the first argument; the id is optional and
    * auto-slugged from the question text (options optional; the server
    * defaults to true/false). */
-  noul(question: string, opts: { id?: string; options?: string[] } = {}): Question {
+  noul(question: string, opts: { id?: string; options?: string[] | Record<string, string> } = {}): Question {
     return this.register({ id: this.qid(question, opts.id), kind: "noul", prompt: question, options: opts.options });
   }
 
-  /** Register an n-way choice question (text-first; id auto-slugs). */
-  choice(question: string, options: string[], opts: { id?: string } = {}): Question {
+  /** Register an n-way choice question (text-first; id auto-slugs). Options
+   * are names, or a name -> description map (Jev-style criteria). */
+  choice(question: string, options: string[] | Record<string, string>, opts: { id?: string } = {}): Question {
     return this.register({ id: this.qid(question, opts.id), kind: "choice", prompt: question, options });
   }
 
-  /** Register an ordinal score question, 2..10 levels (text-first; id auto-slugs). */
-  score(question: string, levels: string[], opts: { id?: string } = {}): Question {
+  /** Register an ordinal score question, 2..10 levels (text-first; id
+   * auto-slugs). Levels are names (array order = ordinal), or a name ->
+   * description map (insertion order = ordinal). */
+  score(question: string, levels: string[] | Record<string, string>, opts: { id?: string } = {}): Question {
     return this.register({ id: this.qid(question, opts.id), kind: "score", prompt: question, levels });
   }
 
@@ -77,7 +80,7 @@ export class Sense {
     return id;
   }
 
-  private register(init: { id: string; kind: QuestionKind; prompt?: string; options?: string[]; levels?: string[] }): Question {
+  private register(init: { id: string; kind: QuestionKind; prompt?: string; options?: string[] | Record<string, string>; levels?: string[] | Record<string, string> }): Question {
     const q = new Question(init);
     const i = this.questions.findIndex((x) => x.id === q.id);
     if (i >= 0) this.questions[i] = q;

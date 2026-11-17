@@ -27,10 +27,24 @@ app.noul("Is someone speaking right now?", { id: "speech" });
 app.noul("Is the speaker talking about cheese right now?", { id: "cheese" });
 app.choice(
   "Which type of cheese are they talking about?",
-  ["cheddar", "brie", "gouda", "parmesan", "camembert", "mozzarella", "blue", "feta", "other"],
+  {
+    cheddar: "Firm yellow cheese",
+    brie: "Soft white-rind cheese",
+    gouda: "Semi-hard Dutch cheese",
+    parmesan: "Hard aged grating cheese",
+    camembert: "Soft bloomy-rind cheese",
+    mozzarella: "Stretchy fresh cheese",
+    blue: "Veined blue cheese",
+    feta: "Crumbly brined cheese",
+    other: "Any other kind of cheese",
+  },
   { id: "cheese_type" },
 );
-app.score("How does the speaker feel about that cheese?", ["hate", "dislike", "meh", "like", "love"], { id: "feeling" });
+app.score(
+  "How does the speaker feel about that cheese?",
+  { hate: "Disgusted", dislike: "Negative", meh: "Neutral", like: "Positive", love: "Delighted" },
+  { id: "feeling" },
+);
 
 /** A wave is a batch of decisions, not an audio response. */
 export type Verdict =

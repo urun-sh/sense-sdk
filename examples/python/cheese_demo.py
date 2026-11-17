@@ -40,13 +40,22 @@ speech = app.noul("Is someone speaking right now?", id="speech")
 cheese = app.noul("Is the speaker talking about cheese right now?", id="cheese")
 kind = app.choice(
     "Which type of cheese are they talking about?",
-    ["cheddar", "brie", "gouda", "parmesan", "camembert",
-     "mozzarella", "blue", "feta", "other"],
+    {
+        "cheddar": "Firm yellow cheese",
+        "brie": "Soft white-rind cheese",
+        "gouda": "Semi-hard Dutch cheese",
+        "parmesan": "Hard aged grating cheese",
+        "camembert": "Soft bloomy-rind cheese",
+        "mozzarella": "Stretchy fresh cheese",
+        "blue": "Veined blue cheese",
+        "feta": "Crumbly brined cheese",
+        "other": "Any other kind of cheese",
+    },
     id="cheese_type",
 )
 feeling = app.score(
     "How does the speaker feel about that cheese?",
-    ["hate", "dislike", "meh", "like", "love"],
+    {"hate": "Disgusted", "dislike": "Negative", "meh": "Neutral", "like": "Positive", "love": "Delighted"},
     id="feeling",
 )
 

@@ -83,7 +83,13 @@ Register Python questions before connecting. Its wave assembler snapshots the qu
 | `choice` | `kind`, `prompt`, and `options` containing named choices | One option and its probability distribution |
 | `score` | `kind`, `prompt`, and `criteria`, an ordered array of 2–10 level descriptions | Distribution over level indices and an expected ordinal value |
 
-Noul option pairs can carry a label and description, for example `[["no","Not speaking"],["yes","Speaking"]]`. The standard decision representation uses `true`/`false` labels. Score criteria must be an ordered array, not a prose string: the level indices must correspond to the registered levels.
+Options and levels can carry a description each, Jev-style:
+
+- `choice` sends `criteria` as a name → description map, e.g. `{"returns": "Exchanges, wrong or damaged items", "billing": "Payment questions"}` — insertion order is the wire order. The bare `options` list of names or `{name, description}` objects is still accepted.
+- `score` sends `criteria` as a name → description map (insertion order is the ordinal order) or the ordered array of level names.
+- `noul` keeps the documented pair form; option pairs can carry a label and description, for example `[["no","Not speaking"],["yes","Speaking"]]` — the first option is the false arm. The standard decision representation uses `true`/`false` labels.
+
+Score criteria must be ordered (array or map), not a prose string: the level indices must correspond to the registered levels.
 
 Questions are unconditional within a wave. The SDK envelope does not send `when` or `depends_on`; SDK predicates and `when` handlers run client-side after decisions arrive.
 
