@@ -59,6 +59,10 @@ class QuestionKind(str, Enum):
 def _option_names(options: Any) -> list[str]:
     if options is None:
         return []
+    if isinstance(options, Mapping):
+        # Jev-style name -> description map: the keys are the option names,
+        # insertion order preserved.
+        return [str(k) for k in options]
     names = []
     for opt in options:
         if isinstance(opt, str):
@@ -234,7 +238,13 @@ class Question:
         entry: dict[str, Any] = {"kind": self.kind.value, "prompt": self.prompt}
         if self.kind is QuestionKind.NOUL:
             if self.options is not None:
-                opts = list(self.options)
+                # A Jev-style name -> description map feeds the same pair
+                # form; descriptions ride the pairs the lane parses.
+                opts = (
+                    list(self.options.items())
+                    if isinstance(self.options, Mapping)
+                    else list(self.options)
+                )
                 if opts and all(isinstance(o, (list, tuple)) for o in opts):
                     pairs = [[str(o[0]), str(o[1])] for o in opts]
                 else:
@@ -245,12 +255,26 @@ class Question:
                     pairs.reverse()
                 entry["options"] = pairs
         elif self.kind is QuestionKind.CHOICE:
-            names = _option_names(self.options or [])
-            entry["options"] = [
-                o if isinstance(o, dict) else {"name": n, "description": ""}
-                for o, n in zip(self.options or [], names, strict=True)
-            ]
+            if isinstance(self.options, Mapping):
+                # Canonical TypeSafe wire: criteria as a name -> description
+                # map (insertion order preserved).
+                entry["criteria"] = {str(k): str(v) for k, v in self.options.items()}
+            else:
+                names = _option_names(self.options or [])
+                entry["options"] = [
+                    o if isinstance(o, dict) else {"name": n, "description": ""}
+                    for o, n in zip(self.options or [], names, strict=True)
+                ]
         else:  # score
+            if isinstance(self.levels, Mapping):
+                # A name -> description map; insertion order is the ordinal
+                # order the lane reads.
+                if not 2 <= len(self.levels) <= 10:
+                    raise ValueError(
+                        f"score question {self.id!r} needs 2..10 levels, got {len(self.levels)}"
+                    )
+                entry["criteria"] = {str(k): str(v) for k, v in self.levels.items()}
+                return entry
             # Send an ordered array so the server uses the registered score
             # levels rather than interpreting a string as free text.
             levels = list(self.levels or [])
