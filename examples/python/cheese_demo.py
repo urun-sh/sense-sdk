@@ -344,8 +344,8 @@ def portable_audio():
 
 def mic_permission_hint():
     """Some platforms, such as macOS, require per-app permission for
-    microphone use but surface a denial only as a generic capture error,
-    so name the likely fix wherever capture fails on one of them."""
+    microphone use but surface a denial as a generic capture-start error,
+    so name the likely fix when starting capture fails on one of them."""
     if sys.platform != "darwin":
         return ""
     return (" Also allow microphone access for your terminal app: "
@@ -408,9 +408,7 @@ class MicStream:
                     timeout=5.0,
                 )
             except asyncio.TimeoutError as exc:
-                raise MicrophoneError(
-                    f"Mic delivered no audio for 5s; try --device with another source.{mic_permission_hint()}"
-                ) from exc
+                raise MicrophoneError("Mic delivered no audio for 5s; try --device with another source.") from exc
             except asyncio.IncompleteReadError as exc:
                 raise MicrophoneError("Microphone stopped; check the selected source.") from exc
             if chunk is None:

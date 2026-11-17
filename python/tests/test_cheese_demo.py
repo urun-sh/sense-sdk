@@ -203,23 +203,6 @@ def test_finished_callback_returns_none(demo, monkeypatch):
     asyncio.run(start_and_fire())
 
 
-def test_no_audio_timeout_hints_macos_permissions(demo, monkeypatch):
-    """The 'opens but delivers no audio' failure — the other TCC symptom."""
-    async def instant_timeout(awaitable, timeout):
-        # The demo waits 5s for the first block; the hint is what is under test.
-        awaitable.close()
-        raise asyncio.TimeoutError
-
-    monkeypatch.setattr(demo, "USE_PIPEWIRE", False)
-    monkeypatch.setattr(demo.asyncio, "wait_for", instant_timeout)
-    monkeypatch.setattr(sys, "platform", "darwin")
-    mic = demo.MicStream(SimpleNamespace(), "auto")  # never started: queue stays empty
-
-    with pytest.raises(demo.MicrophoneError) as excinfo:
-        asyncio.run(mic.chunks().__anext__())
-    assert "Privacy & Security → Microphone" in str(excinfo.value)
-
-
 # ---------------------------------------------------------------------------
 # cleanup: survives a second Ctrl-C, closes everything either way
 # ---------------------------------------------------------------------------
