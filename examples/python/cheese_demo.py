@@ -342,6 +342,15 @@ def portable_audio():
         ) from exc
 
 
+def mic_permission_hint():
+    """macOS surfaces a microphone-permission denial only as a generic PortAudio
+    error, so name the likely fix wherever capture fails on a Mac."""
+    if sys.platform != "darwin":
+        return ""
+    return (" On macOS, also allow microphone access for your terminal app: "
+            "System Settings → Privacy & Security → Microphone, then restart the terminal.")
+
+
 class MicStream:
     """Capture mono PCM16 at 24 kHz; platform code stays out of the Sense demo."""
 
@@ -373,7 +382,7 @@ class MicStream:
                 )
                 self.stream.start()
             except (sd.PortAudioError, ValueError) as exc:
-                raise MicrophoneError(f"Microphone recorder could not start: {exc}") from exc
+                raise MicrophoneError(f"Microphone recorder could not start: {exc}{mic_permission_hint()}") from exc
             return
         try:
             self.process = await asyncio.create_subprocess_exec(
@@ -392,7 +401,9 @@ class MicStream:
                     timeout=5.0,
                 )
             except asyncio.TimeoutError as exc:
-                raise MicrophoneError("Mic delivered no audio for 5s; try --device with another source.") from exc
+                raise MicrophoneError(
+                    f"Mic delivered no audio for 5s; try --device with another source.{mic_permission_hint()}"
+                ) from exc
             except asyncio.IncompleteReadError as exc:
                 raise MicrophoneError("Microphone recorder exited; check the selected source.") from exc
             if chunk is None:

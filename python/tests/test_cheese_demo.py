@@ -144,6 +144,43 @@ def test_error_state_maps_exception_types(demo):
     assert demo.error_state(RuntimeError("boom")) == "error"
 
 
+class FakeSounddevice:
+    """Just enough PortAudio surface for MicStream.start to fail at stream open."""
+
+    class PortAudioError(Exception):
+        pass
+
+    @staticmethod
+    def query_devices(device, kind):
+        return {"hostapi": 0}
+
+    @staticmethod
+    def query_hostapis(index):
+        return {"name": "Core Audio"}
+
+    @staticmethod
+    def RawInputStream(**kwargs):
+        raise FakeSounddevice.PortAudioError(
+            "Error opening RawInputStream: Internal PortAudio error [PaErrorCode -9986]"
+        )
+
+
+def test_mic_start_failure_hints_macos_permissions(demo, monkeypatch):
+    monkeypatch.setattr(demo, "USE_PIPEWIRE", False)
+    monkeypatch.setattr(demo, "portable_audio", lambda: FakeSounddevice)
+    mic = demo.MicStream(SimpleNamespace(), "auto")
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    with pytest.raises(demo.MicrophoneError) as excinfo:
+        asyncio.run(mic.start())
+    assert "Privacy & Security → Microphone" in str(excinfo.value)
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(demo.MicrophoneError) as excinfo:
+        asyncio.run(mic.start())
+    assert "Privacy" not in str(excinfo.value)
+
+
 # ---------------------------------------------------------------------------
 # cleanup: survives a second Ctrl-C, closes everything either way
 # ---------------------------------------------------------------------------
