@@ -37,7 +37,7 @@ Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
     if (url.pathname !== "/client-secret" || req.method !== "POST") {
-      return new Response(mint_server.usage, { status: url.pathname === "/" ? 200 : 404 });
+      return new Response(usage, { status: url.pathname === "/" ? 200 : 404 });
     }
     if (!apiKey) return new Response("server misconfigured: set URUN_API_KEY", { status: 500 });
     const up = await fetch("https://inference.urun.sh/v1/realtime/client_secrets", {
