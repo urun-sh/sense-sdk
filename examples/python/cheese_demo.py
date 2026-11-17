@@ -372,13 +372,19 @@ class MicStream:
                 item = MicrophoneError(f"Microphone capture failed: {status}") if status else bytes(data)
                 loop.call_soon_threadsafe(self.queue.put_nowait, item)
 
+            def on_finished():
+                # The finished callback must return None (cffi void): returning
+                # call_soon_threadsafe's handle makes PortAudio print
+                # "callback with the return type 'void' must return None".
+                loop.call_soon_threadsafe(self.queue.put_nowait, None)
+
             try:
                 host = sd.query_hostapis(sd.query_devices(device, "input")["hostapi"])["name"]
                 settings = sd.WasapiSettings(auto_convert=True) if host == "Windows WASAPI" else None
                 self.stream = sd.RawInputStream(
                     device=device, samplerate=SAMPLE_RATE, channels=1, dtype="int16",
                     blocksize=BLOCKSIZE, extra_settings=settings, callback=on_audio,
-                    finished_callback=lambda: loop.call_soon_threadsafe(self.queue.put_nowait, None),
+                    finished_callback=on_finished,
                 )
                 self.stream.start()
             except (sd.PortAudioError, ValueError) as exc:

@@ -181,6 +181,28 @@ def test_mic_start_failure_hints_macos_permissions(demo, monkeypatch):
     assert "Privacy" not in str(excinfo.value)
 
 
+def test_finished_callback_returns_none(demo, monkeypatch):
+    """cffi declares the PortAudio finished callback void: a return value makes
+    PortAudio print 'callback ... must return None' when the stream ends."""
+    captured = {}
+
+    class RecordingSounddevice(FakeSounddevice):
+        @staticmethod
+        def RawInputStream(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(start=lambda: None)
+
+    monkeypatch.setattr(demo, "USE_PIPEWIRE", False)
+    monkeypatch.setattr(demo, "portable_audio", lambda: RecordingSounddevice)
+    mic = demo.MicStream(SimpleNamespace(), "auto")
+
+    async def start_and_fire():
+        await mic.start()
+        assert captured["finished_callback"]() is None
+
+    asyncio.run(start_and_fire())
+
+
 # ---------------------------------------------------------------------------
 # cleanup: survives a second Ctrl-C, closes everything either way
 # ---------------------------------------------------------------------------
