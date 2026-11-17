@@ -1826,7 +1826,7 @@ wheels = [
 
 [[package]]
 name = "urun-sense"
-version = "0.1.14"
+version = "0.1.15"
 source = { editable = "python" }
 dependencies = [
     { name = "aiohttp" },
