@@ -567,14 +567,15 @@ class RtcWire(Wire):
         self._msgs: asyncio.Queue[str | None] = asyncio.Queue()
 
     async def connect(
-        self, http: aiohttp.ClientSession, calls_url: str, api_key: str, model: str
+        self, http: aiohttp.ClientSession, calls_url: str, api_key: str, model: str,
+        *, dcid: str,
     ) -> None:
         """Open the peer connection, POST the offer, and wait for the datachannel."""
         try:
             from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
         except ImportError as exc:
             raise TransportFailed(
-                "aiortc not installed (pip install 'urun-sense[webrtc]')"
+                "aiortc not installed (pip install urun-sense)"
             ) from exc
 
         # No STUN/TURN: the SFU is reached via host candidates on its
@@ -594,7 +595,7 @@ class RtcWire(Wire):
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
         res = await http.post(
-            f"{calls_url}?model={urllib.parse.quote(model)}",
+            f"{calls_url}?model={urllib.parse.quote(model)}&dcid={urllib.parse.quote(dcid)}",
             data=pc.localDescription.sdp,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/sdp"},
             # Never replay the bearer key to wherever a redirect points.

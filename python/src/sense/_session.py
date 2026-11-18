@@ -19,6 +19,7 @@ import random
 import re
 import time
 import urllib.parse
+import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
@@ -251,6 +252,10 @@ class Session:
         self._wave_q: asyncio.Queue = asyncio.Queue(maxsize=512)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._wire: Wire | None = None
+        #: Client-chosen sticky id for /v1/realtime/calls dials (?dcid): stable
+        #: per session so a reconnect re-binds to the same member ("first
+        #: caller binds" — the edge's own contract).
+        self._dcid = uuid.uuid4().hex
         #: Keepalive event types the current adapter has rejected with
         #: ``unknown_event`` (per connection; reset on every dial).
         self._muted_keepalive: set[str] = set()
@@ -589,7 +594,7 @@ class Session:
         try:
             res = await http.post(
                 self._calls_url(),
-                params={"model": self.model, "transport": "quic"},
+                params={"model": self.model, "transport": "quic", "dcid": self._dcid},
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 # Never replay the bearer key to wherever a redirect points.
                 allow_redirects=False,
@@ -626,7 +631,7 @@ class Session:
         http = _http_session()
         wire = RtcWire()
         try:
-            await wire.connect(http, self._calls_url(), self.api_key, self.model)
+            await wire.connect(http, self._calls_url(), self.api_key, self.model, dcid=self._dcid)
             return wire
         except BaseException:
             await asyncio.shield(wire.close())

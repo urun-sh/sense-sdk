@@ -182,6 +182,9 @@ export class Session {
   /** Keepalive event types the current adapter has rejected with
    * `unknown_event` (per connection; reset on every dial). */
   private mutedKeepalive = new Set<string>();
+  /** Client-chosen sticky id for /v1/realtime/calls dials (?dcid): stable
+   * per session so a reconnect re-binds to the same member. */
+  private readonly dcid = crypto.randomUUID();
 
   constructor(opts: SessionOptions = {}) {
     this.apiKeyProvider = opts.apiKey ?? envVar("URUN_API_KEY") ?? "";
@@ -432,6 +435,7 @@ export class Session {
           apiBaseUrl: this.baseUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:").replace(/\/+$/, ""),
           apiKey,
           model: this.model,
+          dcid: this.dcid,
           wsUrl: this.realtimeUrl(),
         });
         await this.install(wire);

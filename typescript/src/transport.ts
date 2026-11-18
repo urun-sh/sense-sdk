@@ -185,6 +185,9 @@ export interface WireOptions {
   apiBaseUrl: string
   apiKey: string
   model: string
+  /** Client-chosen sticky id the calls edge requires (?dcid): reconnects
+   * with the same id re-bind to the same member ("first caller binds"). */
+  dcid: string
   /** wss://…/v1/realtime?model=… (the WS dial URL). */
   wsUrl: string
 }
@@ -441,7 +444,7 @@ export class QuicWire implements Wire {
     if (WT === undefined) throw new TransportDialError('no WebTransport implementation on this platform')
 
     const res = await fetch(
-      `${this.opts.apiBaseUrl.replace(/\/+$/, '')}/v1/realtime/calls?model=${encodeURIComponent(this.opts.model)}&transport=quic`,
+      `${this.opts.apiBaseUrl.replace(/\/+$/, '')}/v1/realtime/calls?model=${encodeURIComponent(this.opts.model)}&transport=quic&dcid=${encodeURIComponent(this.opts.dcid)}`,
       // Never replay the bearer key to wherever a redirect points.
       { method: 'POST', headers: { authorization: `Bearer ${this.opts.apiKey}` }, redirect: 'error' },
     )
@@ -596,7 +599,7 @@ export class RtcWire implements Wire {
 
     await pc.setLocalDescription(await pc.createOffer())
     const res = await fetch(
-      `${this.opts.apiBaseUrl.replace(/\/+$/, '')}/v1/realtime/calls?model=${encodeURIComponent(this.opts.model)}`,
+      `${this.opts.apiBaseUrl.replace(/\/+$/, '')}/v1/realtime/calls?model=${encodeURIComponent(this.opts.model)}&dcid=${encodeURIComponent(this.opts.dcid)}`,
       {
         method: 'POST',
         headers: { authorization: `Bearer ${this.opts.apiKey}`, 'content-type': 'application/sdp' },
