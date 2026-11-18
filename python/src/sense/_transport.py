@@ -171,14 +171,26 @@ class WsWire(Wire):
         await self._ws.send_json(payload)
 
     async def receive(self) -> str | None:
-        """Wait for one text frame; set the close code and return None on close."""
-        msg = await self._ws.receive()
-        if msg.type is aiohttp.WSMsgType.TEXT:
-            return msg.data
-        self.close_code = self._ws.close_code
-        self.close_reason = msg.extra
-        self.closed = True
-        return None
+        """Wait for one text frame; set the close code and return None on close.
+
+        Server events may ride BINARY frames (prod lax does this: its first
+        output event lands as a binary frame ~170 ms after the dial). Those
+        carry UTF-8 event JSON just like text frames — the TS SDK stringifies
+        every message buffer — so decode and return them. PING/PONG are
+        answered by aiohttp and skipped. Only real CLOSE/CLOSED/ERROR ends
+        the wire."""
+        while True:
+            msg = await self._ws.receive()
+            if msg.type is aiohttp.WSMsgType.TEXT:
+                return msg.data
+            if msg.type is aiohttp.WSMsgType.BINARY:
+                return msg.data.decode("utf-8", "replace")
+            if msg.type in (aiohttp.WSMsgType.PING, aiohttp.WSMsgType.PONG):
+                continue  # keepalive noise; aiohttp already answered the ping
+            self.close_code = self._ws.close_code
+            self.close_reason = msg.extra
+            self.closed = True
+            return None
 
     async def close(self) -> None:
         """Close the websocket and its client session, swallowing errors."""
