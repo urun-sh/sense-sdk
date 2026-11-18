@@ -6,8 +6,8 @@ import asyncio
 import json
 
 import pytest
-from aiohttp import WSMsgType, web
 import sense._session as sess_mod
+from aiohttp import WSMsgType, web
 from sense import OutOfCreditsError, Sense, SenseUnavailable
 
 

@@ -12,8 +12,8 @@ import sys
 import types
 
 import pytest
-from sense import Question, QuestionKind, Session
 import sense._session as sess_mod
+from sense import Question, QuestionKind, Session
 from sense._transport import (
     WT_CONTROL_FRAME_MAX,
     QuicWire,

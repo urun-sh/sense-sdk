@@ -174,10 +174,18 @@ async function nodePonyfill(): Promise<unknown | undefined> {
   if (typeof env.process?.versions?.node !== 'string') return undefined
   try {
     const pkg = '@fails' + '-components/webtransport'
-    const mod = (await import(pkg)) as { WebTransport?: unknown; quicheLoaded?: Promise<unknown> }
-    // The native quiche binding loads asynchronously; constructing a
-    // WebTransport before `quicheLoaded` settles throws a spurious race.
-    await mod.quicheLoaded?.catch(() => undefined)
+    const mod = (await import(pkg)) as { WebTransport?: unknown }
+    // The HTTP/3 binding (@fails-components/webtransport-transport-http3-quiche)
+    // is OPTIONAL: it carries a compile-on-install lifecycle script, so the SDK
+    // never ships it as a dependency (a missing binding must degrade to ws,
+    // never break install). The base package's own `quicheLoaded` promise
+    // RESOLVES undefined on a missing binding (its internal catch swallows the
+    // import failure) and would silently fall back to WebTransport-over-HTTP/2,
+    // which the hub does not serve — probe the binding with our own import and
+    // refuse the rung when it is absent. Apps that want Node QUIC install it.
+    const binding = await import('@fails' + '-components/webtransport-transport-http3-quiche')
+      .then(() => true, () => false)
+    if (!binding) return undefined
     return mod.WebTransport ?? undefined
   } catch {
     return undefined // ponyfill not loadable on this platform: caller falls back
