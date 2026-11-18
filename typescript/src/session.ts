@@ -618,14 +618,12 @@ export class Session {
     const message = errMessage(err);
     console.error(`[sense] session ended fatally; ending streams: ${message}`);
     this.stats.errors++;
-    this.eventListeners.forEach((h) =>
-      h({
-        type: "redial_failed",
-        message,
-        code: err instanceof OutOfCreditsError ? err.code : undefined,
-        raw: err,
-      }),
-    );
+    this.emit({
+      type: "redial_failed",
+      message,
+      code: err instanceof OutOfCreditsError ? err.code : undefined,
+      raw: err,
+    });
     // Recorded, not just signalled: a consumer that is between reads (no
     // waiter parked) must still see the end on its next read.
     this.streamsEnded = true;

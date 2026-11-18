@@ -99,6 +99,7 @@ interface WtReader {
 
 interface WtWriter {
   write(chunk: Uint8Array): Promise<void>
+  close(): Promise<void>
 }
 
 interface WtBidirectionalStream {
@@ -504,8 +505,6 @@ export class QuicWire implements Wire {
   private splitter = new NdjsonSplitter()
   private wt: WtSession | null = null
   private closedSent = false
-  /** The newest write, so close() can let it reach the transport first. */
-  private lastWrite: Promise<void> = Promise.resolve()
 
   static available(): boolean {
     // Node has no native WebTransport but the @fails-components ponyfill is a
@@ -642,7 +641,7 @@ export class QuicWire implements Wire {
     const line = JSON.stringify(obj)
     wdbg(`C→S ${wireType(line)} ${line.length}B`)
     // Writes are not awaited, so this send path does not apply backpressure.
-    this.lastWrite = this.writer.write(new TextEncoder().encode(line + '\n')).catch(() => this.signalClosed())
+    this.writer.write(new TextEncoder().encode(line + '\n')).catch(() => this.signalClosed())
   }
 
   onMessage(cb: (raw: string) => void): void {
@@ -654,13 +653,16 @@ export class QuicWire implements Wire {
   }
 
   async close(): Promise<void> {
-    // wt.close() resets the send stream and drops what has not left it, so let
-    // the newest write (session.close()'s own urun.session.end) reach the
-    // transport first. Bounded: a stalled writer must not hang close().
-    const { promise: bound, resolve } = Promise.withResolvers<void>()
-    const timer = setTimeout(resolve, 250)
-    await Promise.race([this.lastWrite, bound])
-    clearTimeout(timer)
+    // wt.close() resets the send stream and drops what has not left it. Close
+    // the event stream first: that flushes queued writes (session.close()'s
+    // own urun.session.end) and ends the stream cleanly. Bounded: a stalled
+    // writer must not hang close().
+    if (this.writer !== null && !this.closedSent) {
+      const { promise: bound, resolve } = Promise.withResolvers<void>()
+      const timer = setTimeout(resolve, 250)
+      await Promise.race([this.writer.close().catch(() => undefined), bound])
+      clearTimeout(timer)
+    }
     try {
       this.wt?.close()
     } catch {
