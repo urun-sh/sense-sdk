@@ -366,6 +366,8 @@ class Session:
         self._onwave_handlers.append((handler, coalesce, source))
 
     def _accept(self, wave: Wave) -> None:
+        if self._closed:
+            return  # close() began: no handler may start a reply the teardown no longer sweeps
         if not self._live:
             self._live = True
             # The first answers on a lane dialed after another ended: Sense is back.
