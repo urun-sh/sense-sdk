@@ -782,48 +782,54 @@ class Session:
         :meth:`_accept`). Runs until :meth:`close`; a lane death reconnects
         fresh, a fatal error (out of credits) ends the drive and surfaces
         through :meth:`run`."""
-        pumps: list[asyncio.Task] = []
         try:
-            try:
-                while not self._closed:
-                    self._turn_open = False
-                    wire = await self._connect()
-                    self._wire = wire
-                    self._wake_up()  # the sender may hold queued audio
-                    try:
-                        await self._hello(wire)
-                        asm = WaveAssembler(self.questions)
-                        asm.on_decision = self._count_decision
-                        self._line_buf = ""
-                        async for wave in self._run_wire_loop(asm, wire):
-                            self._queue_wave(wave)
-                    except asyncio.CancelledError:
-                        raise
-                    except _LaneDead:
-                        log.warning("[sense] session_gone — reconnecting fresh")
-                    finally:
-                        self._wire = None
-                        try:
-                            await wire.close()
-                        except Exception:
-                            pass
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self._fatal = exc  # surfaces through run(); handlers stop here
-        finally:
-            pumps, self._pumps = self._pumps, []
-            for t in pumps:
-                t.cancel()
-            sender.cancel()
-            presence.cancel()
-            self._wake = None
-            for t in [*pumps, sender, presence]:
+            while not self._closed:
                 try:
-                    await t
-                except (asyncio.CancelledError, Exception):
-                    pass
-            self._queue_wave(None)  # sentinel: end any run() consumer
+                    await self._serve_once()
+                except _LaneDead:
+                    log.warning("[sense] session_gone — reconnecting fresh")
+        except Exception as exc:
+            self._fatal = exc  # surfaces through run(); handlers stop here
+        finally:
+            await self._reap(sender, presence)
+
+    async def _serve_once(self) -> None:
+        """One connect → hello → wire-loop cycle. Raises ``_LaneDead`` when
+        the session is gone (the drive reconnects fresh); any other error
+        escapes to :meth:`_drive` as fatal."""
+        self._turn_open = False
+        wire = await self._connect()
+        self._wire = wire
+        self._wake_up()  # the sender may hold queued audio
+        try:
+            await self._hello(wire)
+            asm = WaveAssembler(self.questions)
+            asm.on_decision = self._count_decision
+            self._line_buf = ""
+            async for wave in self._run_wire_loop(asm, wire):
+                self._queue_wave(wave)
+        finally:
+            self._wire = None
+            try:
+                await wire.close()
+            except Exception:
+                pass
+
+    async def _reap(self, sender: asyncio.Task, presence: asyncio.Task) -> None:
+        """Cancel and settle the drive's support tasks, then send the queue
+        sentinel that ends any run() consumer."""
+        pumps, self._pumps = self._pumps, []
+        for t in pumps:
+            t.cancel()
+        sender.cancel()
+        presence.cancel()
+        self._wake = None
+        for t in [*pumps, sender, presence]:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._queue_wave(None)  # sentinel: end any run() consumer
 
     def _queue_wave(self, wave: Wave | None) -> None:
         """Hand a wave to run() consumers (drop-oldest at 512); ``None`` is

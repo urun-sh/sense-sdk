@@ -7,8 +7,7 @@ import json
 
 import pytest
 from aiohttp import WSMsgType, web
-
-from sense import OutOfCreditsError, Sense, Wave
+from sense import OutOfCreditsError, Sense
 
 
 def dec(qid, t_ms, choice, probs, conf):
@@ -82,6 +81,7 @@ def test_handler_only_session_receives_waves_and_fires():
     async def go():
         state = {"creates": 0}
         runner, port = await _start_fake(_two_wave_lane(state))
+        session = None
         try:
             app = _app(port)
             fired, observed = [], []
@@ -101,6 +101,8 @@ def test_handler_only_session_receives_waves_and_fires():
             assert observed == [0, 1]  # every wave, exactly once each
             assert fired == [0]  # edge-triggered: first true only
         finally:
+            if session is not None:
+                await session.close()  # ends the drive; releases the wire for runner.cleanup()
             await runner.cleanup()
 
     asyncio.run(go())
