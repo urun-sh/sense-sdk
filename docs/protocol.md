@@ -264,6 +264,8 @@ Both SDKs bound what a remote endpoint can make them buffer:
 
 On any wire death while the session is open, both SDKs keep the registered questions, reset the conversation state, and reconnect fresh (`session_gone`/`1011` immediately; any other close code after a backoff). If the TypeScript reconnect fails terminally — dialing errors that are not transient refusals, or ten consecutive connections that each lived under 10 s (sustained churn) — its wave streams end with a `redial_failed` event rather than raising an unhandled rejection or spinning forever.
 
+Both SDKs make the redial observable. `session.state` reads `connecting`, `live` (the current connection has delivered a wave), `reconnecting` (a connection ended and a fresh one is being dialed, or is up but has not answered yet; not a failure), `closed`, or `failed` (terminal). Each wire death that will be redialed emits a `lane_ended` event — `code` is the WebSocket close code as a string and `message` the close reason, when the wire reported them — and the first wave on the fresh connection emits `reconnected` with the outage length (`raw.downMs` in TypeScript, `raw["down_ms"]` in Python). A terminal end emits `redial_failed`. TypeScript delivers these through `session.onEvent(handler)`, Python through `session.on_event(handler)`; `session.stats.reconnects` counts them. A connection that stays open while the server stops answering emits none of these: the state stays `live`.
+
 Retry policies differ. Python retries transient WebSocket/network failures with exponential backoff, incorporating numeric `Retry-After` values for `429`/`503` up to its delay cap; reconnects after a wire death redial immediately, without a young-connection budget. TypeScript retries WebSocket `429`/`503` refusals with exponential backoff; it does not consume `Retry-After`; deaths of wires younger than 10 s back off on a jittered ladder, capped at ten consecutive young deaths before the streams end. Python also re-sends its accumulated transcript to the new session on reconnect; TypeScript discards conversation text across reconnects. QUIC/WebRTC setup failures follow the transport fallback policy in §1.
 
 ## 8. Mapping to the SDK surface
@@ -274,6 +276,7 @@ Retry policies differ. Python retries transient WebSocket/network failures with 
 | `app.noul`, `app.choice`, `app.score` | Build Jev-shaped question entries (`type`/`instructions`/`criteria`) in the instructions envelope |
 | `session.attach(...)` | The one canonical input path: pumps audio (`input_audio_buffer.append`), video (`conversation.item.create` with `input_image`), and text (`input_text`) from the attached sources |
 | `session.run()` | Connect/register, drive turns, assemble decisions, and yield waves |
+| `session.close()` | Send `urun.session.end` (the explicit end: the server releases the session's compute at once, not after its re-attach grace), then close the connection |
 | `Wave` | Decoded complete answer set (§6) |
 | Predicates and handlers | Client-side evaluation; they do not suppress server questions |
 

@@ -302,3 +302,60 @@ def test_young_wire_deaths_back_off_and_give_up(monkeypatch):
             await runner.cleanup()
 
     asyncio.run(go())
+
+
+def test_lane_ending_and_coming_back_is_visible(monkeypatch):
+    """A lane that ends mid-session redials on its own, and the app can tell:
+    ``state`` reads reconnecting then live, with lane_ended / reconnected events."""
+
+    async def go():
+        monkeypatch.setattr(sess_mod, "REDIAL_BASE_S", 0.01)
+
+        async def handler(request):
+            state["dials"] += 1
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            if state["dials"] == 1:
+                await ws.receive()  # the session.update: the lane was registered, then it ends
+                await ws.close(code=1001, message=b"outbound buffer exceeded")
+            else:
+                await answer.wait()  # connected, but Sense has not answered yet
+                delta = "\n".join(
+                    [
+                        dec("finished", 0, "true", {"true": 0.9, "false": 0.1}, 0.9),
+                        dec("intent", 0, "support", {"support": 0.7, "other": 0.3}, 0.7),
+                    ]
+                )
+                await ws.send_json({"type": "response.output_text.delta", "delta": delta + "\n"})
+                await ws.send_json({"type": "response.completed"})
+                async for msg in ws:
+                    if msg.type is WSMsgType.TEXT:
+                        state["got"].append(json.loads(msg.data).get("type"))
+            return ws
+
+        state = {"dials": 0, "got": []}
+        answer = asyncio.Event()
+        runner, port = await _start_fake(handler)
+        session = _app(port).session()
+        seen = []
+        session.on_event(lambda ev: seen.append((ev.type, session.state, ev.code, ev.message)))
+        assert session.state == "connecting"
+        consumer = asyncio.create_task(_consume_all(session))
+        try:
+            await _wait_until(lambda: state["dials"] == 2)
+            await asyncio.sleep(0.05)
+            assert seen == [("lane_ended", "reconnecting", "1001", "outbound buffer exceeded")]
+            assert session.state == "reconnecting"  # the fresh lane is up; "back" waits for an answer
+            answer.set()
+            await _wait_until(lambda: len(seen) >= 2)
+            assert seen[1][:2] == ("reconnected", "live")
+            assert session.stats.reconnects == 1
+        finally:
+            await session.close()
+            await consumer
+            await runner.cleanup()
+        assert session.state == "closed"
+        # close() is the app's explicit end: the server is told, so the seat frees at once.
+        assert "urun.session.end" in state["got"]
+
+    asyncio.run(go())

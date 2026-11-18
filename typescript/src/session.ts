@@ -63,6 +63,13 @@ export interface SessionEvent {
   raw: unknown;
 }
 
+/** Where the session's lane is right now. `live` means Sense has answered on
+ * the current connection (a connected lane that has not answered yet is still
+ * `connecting` / `reconnecting`). `reconnecting` means a lane ended and the SDK
+ * is dialing a fresh one (questions kept); it is not a failure. `failed` is
+ * terminal: the SDK has stopped redialing. */
+export type SessionState = "connecting" | "live" | "reconnecting" | "closed" | "failed";
+
 /** Parse a server event object into the SDK's session-event shape. */
 export function sessionEvent(raw: unknown): SessionEvent {
   const obj = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
@@ -151,6 +158,10 @@ export class Session {
   private inputSinceTurn = 0;
   private registry: Question[] = [];
   private eventListeners: ((ev: SessionEvent) => void)[] = [];
+  /** The current lane has delivered a wave. */
+  private answering = false;
+  /** When a lane last ended with no answers since (ms epoch; 0 = none). */
+  private laneEndedAt = 0;
   /** Until when the run loop must not re-open a turn (response_in_progress backoff). */
   private reopenNotBefore = 0;
   /** Consecutive response_in_progress refusals with no wave in between —
@@ -202,6 +213,15 @@ export class Session {
 
   get closed(): boolean {
     return this.isClosed;
+  }
+
+  /** The lane's state, readable at any time (see {@link SessionState}). The
+   * transitions also arrive on `onEvent` as `lane_ended` and `reconnected`. */
+  get state(): SessionState {
+    if (this.fatalEnded) return "failed";
+    if (this.isClosed) return "closed";
+    if (this.answering) return "live";
+    return this.laneEndedAt > 0 ? "reconnecting" : "connecting";
   }
 
   /** Replace the whole question registry (adds, edits AND removals) and push
@@ -502,7 +522,19 @@ export class Session {
     this.inputSinceTurn = 0;
     if (this.isClosed || this.reconnecting || this.fatalEnded) return; // terminal (user close / ended), or a redial is already scheduled
     if (this.endForCredits(reason)) return; // credits cut: fatal end, never redial
-    this.redialAfterDeath(code, this.resetForRedial());
+    const healing = this.resetForRedial();
+    this.answering = false;
+    this.laneEndedAt = Date.now();
+    // The lane is gone and a fresh dial follows (or, at the redial budget, a
+    // `redial_failed`). `code`/`message` are the close code and reason as the
+    // wire reported them; `selfHeal` marks the SDK dropping a wedged lane itself.
+    this.emit({
+      type: "lane_ended",
+      code: String(code),
+      message: reason || undefined,
+      raw: { code, reason: reason ?? "", selfHeal: healing },
+    });
+    this.redialAfterDeath(code, healing);
   }
 
   /** §7 redial after a wire death that is not terminal: session_gone (or our
@@ -610,7 +642,11 @@ export class Session {
       return;
     }
     if (this.dispatchByType(msg)) return;
-    this.eventListeners.forEach((h) => h(sessionEvent(msg)));
+    this.emit(sessionEvent(msg));
+  }
+
+  private emit(ev: SessionEvent): void {
+    this.eventListeners.forEach((h) => h(ev));
   }
 
   /** Route one parsed event by type; true when fully handled client-side. */
@@ -812,6 +848,15 @@ export class Session {
   private deliver(wave: Wave): void {
     this.context.ingest(wave);
     this.wedgeRefusals = 0; // waves flowing — any refusal now is the cancel race, not a wedge
+    if (!this.answering && this.wire) {
+      this.answering = true;
+      // The first answers on a lane dialed after another ended: Sense is back.
+      if (this.laneEndedAt > 0) {
+        const downMs = Date.now() - this.laneEndedAt;
+        this.laneEndedAt = 0;
+        this.emit({ type: "reconnected", raw: { downMs, transport: this.wire.kind, reconnects: this.stats.reconnects } });
+      }
+    }
     this.waveQueue.push(wave);
     if (this.waveQueue.length > MAX_QUEUED_WAVES) this.waveQueue.shift();
     while (this.waveWaiters.length && this.waveQueue.length) {
@@ -966,7 +1011,16 @@ export class Session {
     for (const w of this.waveWaiters.splice(0)) w(null);
     const wire = this.wire;
     this.wire = null;
-    if (wire) await wire.close();
+    if (!wire) return;
+    // The app said end: tell the server, so the seat frees now instead of
+    // being held ~120 s for a re-attach (best effort; an adapter without the
+    // verb answers unknown_event to a socket we are closing).
+    try {
+      wire.sendJson({ type: "urun.session.end" });
+    } catch {
+      // a dead wire cannot be told; closing it is all that is left
+    }
+    await wire.close();
   }
 }
 

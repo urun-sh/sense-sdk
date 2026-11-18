@@ -1,7 +1,7 @@
 /** @urun-sh/sense — public surface. */
 export { Sense, type SenseOptions } from "./sense.ts";
 export { Session, sessionEvent } from "./session.ts";
-export type { SessionOptions, SessionEvent, InputStreamSource, InputSources, ApiKeyProvider } from "./session.ts";
+export type { SessionOptions, SessionEvent, SessionState, InputStreamSource, InputSources, ApiKeyProvider } from "./session.ts";
 export { connectWire, transportOrder, TRANSPORT_DIAL_TIMEOUT_MS } from "./transport.ts";
 export type { Transport, Wire, WireOptions, WireDialer } from "./transport.ts";
 export { Question, instructionsEnvelope } from "./question.ts";

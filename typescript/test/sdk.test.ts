@@ -526,6 +526,51 @@ describe("reconnect policy", () => {
   });
 });
 
+describe("lane state", () => {
+  test("a lane ending and coming back is visible: state, lane_ended, then reconnected once Sense answers", async () => {
+    const keys: string[] = [];
+    const wires: FakeWire[] = [];
+    const reDialed = Promise.withResolvers<void>();
+    const s = new Session({
+      apiKey: "k",
+      questions: QUESTIONS,
+      wireFactory: recordingFactory(keys, wires, () => reDialed.resolve()),
+    });
+    const events: SessionEvent[] = [];
+    s.onEvent((ev) => events.push(ev));
+    expect(s.state).toBe("connecting");
+    vi.useFakeTimers();
+    try {
+      await s.connect();
+      expect(s.state).toBe("connecting"); // connected, but Sense has not answered yet
+      driveDeliverWave(wires[0]!, "support", "respond");
+      expect(s.state).toBe("live");
+      expect(events).toEqual([]); // the first lane is not a recovery
+      wires[0]!.drop(1001, "outbound buffer exceeded");
+      // Between the death and the fresh lane a developer can tell "dialing again" from "gone".
+      expect(s.state).toBe("reconnecting");
+      expect(events.map((e) => e.type)).toEqual(["lane_ended"]);
+      expect(events[0]!.code).toBe("1001");
+      expect(events[0]!.message).toBe("outbound buffer exceeded");
+      vi.advanceTimersByTime(60_000);
+      await reDialed.promise;
+      await drain();
+      // The fresh connection is up, but "back" is only claimed once it answers.
+      expect(s.state).toBe("reconnecting");
+      expect(events.map((e) => e.type)).toEqual(["lane_ended"]);
+      driveDeliverWave(wires[1]!, "support", "respond");
+      expect(s.state).toBe("live");
+      expect(events.map((e) => e.type)).toEqual(["lane_ended", "reconnected"]);
+      await s.close();
+      expect(s.state).toBe("closed");
+      // close() is the app's explicit end: the server is told, so the seat frees at once.
+      expect(sentHas(wires[1]!, "urun.session.end")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("wedge self-heal", () => {
   test("a wedged lane (response_in_progress 3x, no waves) redials fresh and keeps state", async () => {
     const keys: string[] = [];

@@ -13,6 +13,7 @@ The Sense SDK gives you one unified surface for perception, decision-making, and
 - [Run an example](#run-an-example)
 - [Python example walk-through](#python-example-walk-through)
 - [TypeScript example walk-through](#typescript-example-walk-through)
+- [Reconnects](#reconnects)
 - [Next steps](#next-steps)
 
 ## Get started (with Python or TypeScript)
@@ -308,6 +309,9 @@ try {
     await session.close();
 }
 ```
+
+## Reconnects
+If the connection to Sense ends mid-session, the SDK dials a fresh one on its own and keeps your questions. `session.state` reads `connecting`, `live`, `reconnecting`, `closed` or `failed`, and the transitions arrive as `lane_ended`, `reconnected` and `redial_failed` events on `session.onEvent(handler)` (TypeScript) or `session.on_event(handler)` (Python), so your UI can say so. See the package READMEs for a snippet.
 
 ## Next steps
 Beyond this example, the SDK also has predicates + edge-triggered handlers and a per-wave observer. In TypeScript: `app.when(pred, handler)` and `app.onWave(handler)`. In Python both are decorators that return the function unchanged:
