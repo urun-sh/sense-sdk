@@ -131,12 +131,15 @@ class Sense:
     def when(
         self, pred: Predicate, handler: Callable | None = None, *, source: str | None = None
     ) -> Any:
-        """Register an edge-triggered ``when``. Both forms work, and the
-        decorator form returns the function::
+        """Register an edge-triggered ``when`` — curried on the predicate as a
+        decorator (the one documented form; it returns the function unchanged,
+        so stacking two ``@app.when`` on one function registers two rules)::
 
-            app.when(pred, handler)
             @app.when(pred)
             async def respond(event): ...
+
+        ``app.when(pred, handler)`` goes through the same function; no second
+        method exists.
         """
         if handler is None:
 
@@ -150,11 +153,14 @@ class Sense:
     def on_wave(
         self, handler: Callable | None = None, coalesce: bool = False, *, source: str | None = None
     ) -> Any:
-        """Observe every completed wave. Both forms work::
+        """Observe every completed wave — as a decorator, bare or with
+        keyword options (returns the function unchanged)::
 
-        app.on_wave(handler, coalesce=True)
-        @app.on_wave(coalesce=True)
-        def observe(event): ...
+            @app.on_wave(coalesce=True)
+            def observe(event): ...
+
+        ``app.on_wave(handler, coalesce=True)`` goes through the same
+        function; no second method exists.
         """
         if handler is None:
 

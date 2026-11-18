@@ -310,7 +310,17 @@ try {
 ```
 
 ## Next steps
-Beyond this example, the SDK also has predicates + `app.when(pred, handler)` for edge-triggered handlers, and `app.onWave(handler)` (Python: `app.on_wave(handler)`) to observe every completed wave. Refer to the [Sense reference](https://docs.urun.sh/docs/sense/reference?facet=session) for details.
+Beyond this example, the SDK also has predicates + edge-triggered handlers and a per-wave observer. In TypeScript: `app.when(pred, handler)` and `app.onWave(handler)`. In Python both are decorators that return the function unchanged:
+
+```python
+@app.when(finished & (intent == "support"))
+async def respond(event): ...
+
+@app.on_wave(coalesce=True)
+def observe(event): ...
+```
+
+Refer to the [Sense reference](https://docs.urun.sh/docs/sense/reference?facet=session) for details.
 
 ### Full example code
   - [python](examples/python/cheese_demo.py)
