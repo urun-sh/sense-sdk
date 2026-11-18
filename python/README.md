@@ -142,6 +142,22 @@ finally:
     await session.close()
 ```
 
+## Reconnects
+If the connection to Sense ends mid-session, the SDK dials a fresh one on its own and keeps your questions. You can show that in your UI:
+
+```python
+@session.on_event
+def lane(ev):
+    if ev.type == "lane_ended":      # ev.code / ev.message: close code and reason
+        show_status("Reconnecting to Sense…")
+    elif ev.type == "reconnected":
+        show_status("Sense is back")
+    elif ev.type == "redial_failed":  # terminal; run() raises the cause
+        show_status(f"Sense is unavailable: {ev.message}")
+
+session.state  # "connecting" | "live" | "reconnecting" | "closed" | "failed"
+```
+
 ## Next steps
 Beyond this example, the SDK also has decorator handlers — curried on the predicate, returning the function unchanged:
 

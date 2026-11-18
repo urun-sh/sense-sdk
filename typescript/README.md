@@ -175,6 +175,18 @@ try {
 }
 ```
 
+## Reconnects
+If the connection to Sense ends mid-session, the SDK dials a fresh one on its own and keeps your questions. You can show that in your UI:
+
+```ts
+session.onEvent((ev) => {
+    if (ev.type === "lane_ended") showStatus("Reconnecting to Sense…"); // ev.code / ev.message: close code and reason
+    if (ev.type === "reconnected") showStatus("Sense is back");
+    if (ev.type === "redial_failed") showStatus(`Sense is unavailable: ${ev.message}`); // terminal
+});
+session.state; // "connecting" | "live" | "reconnecting" | "closed" | "failed"
+```
+
 ## Next steps
 Beyond this example, the SDK also has predicates + `app.when(pred, handler)` for edge-triggered handlers, and `app.onWave(handler)` to observe every completed wave. Refer to the [Sense reference](https://docs.urun.sh/docs/sense/reference?facet=session) for details.
 

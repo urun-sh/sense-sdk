@@ -99,6 +99,7 @@ interface WtReader {
 
 interface WtWriter {
   write(chunk: Uint8Array): Promise<void>
+  close(): Promise<void>
 }
 
 interface WtBidirectionalStream {
@@ -652,6 +653,16 @@ export class QuicWire implements Wire {
   }
 
   async close(): Promise<void> {
+    // wt.close() resets the send stream and drops what has not left it. Close
+    // the event stream first: that flushes queued writes (session.close()'s
+    // own urun.session.end) and ends the stream cleanly. Bounded: a stalled
+    // writer must not hang close().
+    if (this.writer !== null && !this.closedSent) {
+      const { promise: bound, resolve } = Promise.withResolvers<void>()
+      const timer = setTimeout(resolve, 250)
+      await Promise.race([this.writer.close().catch(() => undefined), bound])
+      clearTimeout(timer)
+    }
     try {
       this.wt?.close()
     } catch {

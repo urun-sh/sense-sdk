@@ -32,6 +32,7 @@ from ._core import (
     OutOfCreditsError,
     ProtocolError,
     Question,
+    SessionEvent,
     Wave,
     WaveAssembler,
 )
@@ -119,7 +120,8 @@ class SenseUnavailable(RuntimeError):
 
 
 class _LaneDead(Exception):
-    """`session_gone` (close 1011): discard local session state, reconnect fresh."""
+    """`session_gone` (close 1011): discard local session state, reconnect fresh.
+    Its message, when set, names the error event that ended the lane."""
 
 
 @dataclass
@@ -128,6 +130,7 @@ class SessionStats:
     decisions: int = 0
     errors: int = 0
     protocol_errors: int = 0
+    reconnects: int = 0
 
 
 class _AudioInput:
@@ -235,6 +238,12 @@ class Session:
         self.stats = SessionStats()
         self._ctx = Context(session=self)
         self._onwave_handlers: list[tuple[Callable, bool]] = []
+        self._event_handlers: list[Callable[[SessionEvent], None]] = []
+        #: Lane state behind :attr:`state`: the current lane has delivered a
+        #: wave / when a lane last ended with no answers since / how its wire closed.
+        self._live = False
+        self._lane_ended_at: float | None = None
+        self._last_close: tuple[int | None, str | None] = (None, None)
         self._transcript = ""
         self._audio: dict[str, deque] = {}
         self._active_source = "default"  # last input source drained (labeling)
@@ -313,6 +322,40 @@ class Session:
     def _envelope(self) -> dict:
         return {"questions": {q.name: q.to_envelope() for q in self.questions}, "hz": self.hz}
 
+    # -- lane state ----------------------------------------------------------
+
+    @property
+    def state(self) -> str:
+        """Where the lane is right now: ``connecting``, ``live`` (Sense has
+        answered on the current connection), ``reconnecting`` (a lane ended
+        and a fresh one is being dialed or has not answered yet; questions
+        kept, not a failure), ``closed``, or ``failed`` (terminal: the SDK has
+        stopped redialing; :meth:`run` raises the cause)."""
+        if self._fatal is not None:
+            return "failed"
+        if self._closed:
+            return "closed"
+        if self._live:
+            return "live"
+        return "reconnecting" if self._lane_ended_at is not None else "connecting"
+
+    def on_event(self, handler: Callable[[SessionEvent], None]) -> Callable[[SessionEvent], None]:
+        """Observe lane transitions (usable as a decorator). ``handler`` is a
+        plain function called with a :class:`SessionEvent` whose ``type`` is
+        ``lane_ended`` (``code``/``message`` are the close code and reason; a
+        redial follows), ``reconnected`` (``raw["down_ms"]`` is how long Sense
+        was away), or ``redial_failed`` (terminal)."""
+        self._event_handlers.append(handler)
+        return handler
+
+    def _emit(self, **fields: Any) -> None:
+        ev = SessionEvent(fields)
+        for handler in list(self._event_handlers):
+            try:
+                handler(ev)
+            except Exception:
+                log.exception("[sense] on_event handler raised")
+
     # -- wave handlers (the facade registers; see Sense.when / Sense.on_wave) --
 
     def _on_wave(
@@ -323,6 +366,19 @@ class Session:
         self._onwave_handlers.append((handler, coalesce, source))
 
     def _accept(self, wave: Wave) -> None:
+        if self._closed:
+            return  # close() began: no handler may start a reply the teardown no longer sweeps
+        if not self._live:
+            self._live = True
+            # The first answers on a lane dialed after another ended: Sense is back.
+            ended, self._lane_ended_at = self._lane_ended_at, None
+            if ended is not None:
+                self._emit(
+                    type="reconnected",
+                    down_ms=int((time.monotonic() - ended) * 1000),
+                    transport=getattr(self._wire, "kind", None),
+                    reconnects=self.stats.reconnects,
+                )
         # When the server omits a source label, attribute the wave to the
         # input source last drained. This does not isolate sources server-side.
         if wave.source == "default" and self._active_source != "default":
@@ -819,10 +875,26 @@ class Session:
         try:
             while not self._closed:
                 lane_dead = False
+                cause = ""
                 try:
                     await self._serve_once()
-                except _LaneDead:
+                except _LaneDead as dead:
                     lane_dead = True
+                    cause = str(dead)
+                if self._closed:
+                    break
+                # The lane is gone and a fresh dial follows (or, at the young-
+                # death bound below, a redial_failed).
+                code, reason = self._last_close
+                self.stats.reconnects += 1
+                if self._lane_ended_at is None:  # a lane that never answered keeps the outage's start
+                    self._lane_ended_at = time.monotonic()
+                self._emit(
+                    type="lane_ended",
+                    code=None if code is None else str(code),
+                    message=reason or cause or None,
+                    self_heal=cause == "response_in_progress",
+                )
                 # A connection cycle just ended. A wire that went live and
                 # died within YOUNG_WIRE_S is churn (relay/GS restart, an
                 # adapter refusing us), not a fresh start: back off.
@@ -847,6 +919,7 @@ class Session:
                         log.warning("[sense] session_gone — reconnecting fresh")
         except Exception as exc:
             self._fatal = exc  # surfaces through run(); handlers stop here
+            self._emit(type="redial_failed", code=getattr(exc, "code", None), message=str(exc))
         finally:
             await self._reap(sender, presence)
 
@@ -857,9 +930,7 @@ class Session:
         delay = max(self._redial_delay, REDIAL_BASE_S)
         self._redial_delay = min(delay * 2, RETRY_CAP_S)
         delay *= 0.5 + random.random()  # ±50% jitter
-        wire = self._wire
-        code = getattr(wire, "close_code", None)
-        reason = getattr(wire, "close_reason", None)
+        code, reason = self._last_close
         log.warning(
             "[sense] wire died young (close_code=%s reason=%r, %d in a row) — redialing in %.1fs",
             code,
@@ -887,6 +958,8 @@ class Session:
             async for wave in self._run_wire_loop(asm, wire):
                 self._queue_wave(wave)
         finally:
+            self._live = False
+            self._last_close = (getattr(wire, "close_code", None), getattr(wire, "close_reason", None))
             self._wire = None
             try:
                 await wire.close()
@@ -1018,7 +1091,7 @@ class Session:
             await self._send(wire, {"type": "input_audio_buffer.commit"})
             return
         if code == "session_gone":
-            raise _LaneDead()
+            raise _LaneDead("session_gone")
         if code == "unknown_event":
             # An adapter that doesn't speak our keepalive events rejects each
             # one once and only once matters: the first rejection mutes that
@@ -1043,7 +1116,7 @@ class Session:
             # reconnects fresh, which is the same recovery one step sooner
             # and keeps the loop from hammering response.create (no 2 s
             # backoff on this lane).
-            raise _LaneDead()
+            raise _LaneDead("response_in_progress")
         self.stats.errors += 1
         log.warning("[sense] lane error: %s", err)
         self._turn_open = False
@@ -1082,6 +1155,17 @@ class Session:
                     pass  # a failed presence frame rides the next tick; the wire loop owns reconnects
             await asyncio.sleep(PRESENCE_CADENCE_S)
 
+    async def _tell_server_ended(self, wire: Wire | None) -> None:
+        """The app said end: tell the server, so the seat frees now instead of
+        being held ~120 s for a re-attach. Best effort and bounded; an adapter
+        without the verb answers unknown_event to a socket we are closing."""
+        if wire is None or wire.closed:
+            return
+        try:
+            await asyncio.wait_for(self._send(wire, {"type": "urun.session.end"}), 1.0)
+        except Exception:
+            pass
+
     async def close(self) -> None:
         """Stop streams, tasks, session: cancel every tracked ctx task
         (firing its ``on_cancel`` hook) BEFORE tearing down the wire, so a
@@ -1090,24 +1174,28 @@ class Session:
         pumps, self._pumps = self._pumps, []
         for t in pumps:
             t.cancel()
-        drive, self._drive_task = self._drive_task, None
-        if drive is not None:
-            drive.cancel()
         for key in list(self._ctx._tasks):
             self._ctx.cancel(key, barge_in=False)
-        wake = self._wake
-        if wake is not None:
-            wake.set()
         wire, self._wire = self._wire, None
-        if wire is not None:
-            try:
-                await wire.close()
-            except Exception:
-                pass
-        if drive is not None:
-            # The drive's own finally reaps pumps/sender/presence and sends
-            # the queue sentinel; await it so nothing outlives close().
-            try:
-                await drive
-            except (asyncio.CancelledError, Exception):
-                pass
+        drive, self._drive_task = self._drive_task, None
+        try:
+            await self._tell_server_ended(wire)
+        finally:
+            # Runs even when the caller cancels close() during the send above.
+            if drive is not None:
+                drive.cancel()
+            wake = self._wake
+            if wake is not None:
+                wake.set()
+            if wire is not None:
+                try:
+                    await wire.close()
+                except Exception:
+                    pass
+            if drive is not None:
+                # The drive's own finally reaps pumps/sender/presence and sends
+                # the queue sentinel; await it so nothing outlives close().
+                try:
+                    await drive
+                except (asyncio.CancelledError, Exception):
+                    pass
