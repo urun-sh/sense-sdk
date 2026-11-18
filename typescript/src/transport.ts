@@ -131,7 +131,7 @@ interface RtcPeerConnection {
   connectionState: 'new' | 'connecting' | 'connected' | 'disconnected' | 'failed' | 'closed'
   iceConnectionState: string
   localDescription: { sdp: string } | null
-  createDataChannel(label: string): RtcDataChannel
+  createDataChannel(label: string, init?: { negotiated?: boolean; id?: number }): RtcDataChannel
   addTransceiver(kind: 'audio' | 'video', init: { direction: 'sendonly' | 'recvonly' | 'sendrecv' | 'inactive' }): unknown
   createOffer(): Promise<{ type: 'offer'; sdp: string }>
   setLocalDescription(desc: { type: string; sdp: string }): Promise<void>
@@ -615,7 +615,10 @@ export class RtcWire implements Wire {
     // No STUN/TURN: the SFU is reached via host candidates on its announced ports.
     const pc = new RTCP({ iceServers: [] })
     this.pc = pc
-    const dc = pc.createDataChannel('oai-events')
+    // The SFU writes server events as raw JSON on SCTP stream 0 with no DCEP
+    // handshake: a client-DCEP channel never receives them. A negotiated id-0
+    // channel registers stream 0 directly (same fix as the Python SDK).
+    const dc = pc.createDataChannel('oai-events', { negotiated: true, id: 0 })
     this.dc = dc
     // The SDK's media rides the event channel as JSON; the audio m-line exists
     // so the SFU's sendrecv merge can answer. It must be sendrecv: the media
