@@ -524,7 +524,7 @@ export class Session {
     if (this.endForCredits(reason)) return; // credits cut: fatal end, never redial
     const healing = this.resetForRedial();
     this.answering = false;
-    this.laneEndedAt = Date.now();
+    if (this.laneEndedAt === 0) this.laneEndedAt = Date.now(); // a lane that never answered keeps the outage's start
     // The lane is gone and a fresh dial follows (or, at the redial budget, a
     // `redial_failed`). `code`/`message` are the close code and reason as the
     // wire reported them; `selfHeal` marks the SDK dropping a wedged lane itself.
@@ -646,7 +646,15 @@ export class Session {
   }
 
   private emit(ev: SessionEvent): void {
-    this.eventListeners.forEach((h) => h(ev));
+    // A throwing app handler must not cut a lifecycle step short (a lane_ended
+    // handler runs before the redial is scheduled).
+    for (const h of this.eventListeners) {
+      try {
+        h(ev);
+      } catch (err) {
+        console.error(`[sense] onEvent handler threw on ${ev.type}: ${errMessage(err)}`);
+      }
+    }
   }
 
   /** Route one parsed event by type; true when fully handled client-side. */

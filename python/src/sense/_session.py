@@ -885,7 +885,8 @@ class Session:
                 # death bound below, a redial_failed).
                 code, reason = self._last_close
                 self.stats.reconnects += 1
-                self._lane_ended_at = time.monotonic()
+                if self._lane_ended_at is None:  # a lane that never answered keeps the outage's start
+                    self._lane_ended_at = time.monotonic()
                 self._emit(
                     type="lane_ended",
                     code=None if code is None else str(code),
@@ -1152,11 +1153,10 @@ class Session:
                     pass  # a failed presence frame rides the next tick; the wire loop owns reconnects
             await asyncio.sleep(PRESENCE_CADENCE_S)
 
-    async def _tell_server_ended(self) -> None:
+    async def _tell_server_ended(self, wire: Wire | None) -> None:
         """The app said end: tell the server, so the seat frees now instead of
         being held ~120 s for a re-attach. Best effort and bounded; an adapter
         without the verb answers unknown_event to a socket we are closing."""
-        wire = self._wire
         if wire is None or wire.closed:
             return
         try:
@@ -1169,28 +1169,31 @@ class Session:
         (firing its ``on_cancel`` hook) BEFORE tearing down the wire, so a
         reply never completes after the app believes the session is dead."""
         self._closed = True
-        await self._tell_server_ended()
         pumps, self._pumps = self._pumps, []
         for t in pumps:
             t.cancel()
-        drive, self._drive_task = self._drive_task, None
-        if drive is not None:
-            drive.cancel()
         for key in list(self._ctx._tasks):
             self._ctx.cancel(key, barge_in=False)
-        wake = self._wake
-        if wake is not None:
-            wake.set()
         wire, self._wire = self._wire, None
-        if wire is not None:
-            try:
-                await wire.close()
-            except Exception:
-                pass
-        if drive is not None:
-            # The drive's own finally reaps pumps/sender/presence and sends
-            # the queue sentinel; await it so nothing outlives close().
-            try:
-                await drive
-            except (asyncio.CancelledError, Exception):
-                pass
+        drive, self._drive_task = self._drive_task, None
+        try:
+            await self._tell_server_ended(wire)
+        finally:
+            # Runs even when the caller cancels close() during the send above.
+            if drive is not None:
+                drive.cancel()
+            wake = self._wake
+            if wake is not None:
+                wake.set()
+            if wire is not None:
+                try:
+                    await wire.close()
+                except Exception:
+                    pass
+            if drive is not None:
+                # The drive's own finally reaps pumps/sender/presence and sends
+                # the queue sentinel; await it so nothing outlives close().
+                try:
+                    await drive
+                except (asyncio.CancelledError, Exception):
+                    pass
