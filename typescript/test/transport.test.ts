@@ -85,6 +85,7 @@ const baseOpts: WireOptions = {
   apiKey: "sk-test",
   model: "sense-latest:bf16",
   wsUrl: "wss://inference.urun.sh/v1/realtime?model=sense-latest%3Abf16",
+  dcid: "test-dcid",
 };
 
 // ---------------------------------------------------------------------------
