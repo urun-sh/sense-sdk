@@ -26,7 +26,9 @@ export const TRANSPORT_DIAL_TIMEOUT_MS: Record<'quic' | 'webrtc', number> = {
   // the whole POST→WT-ready→hello-ack dance through the console's same-origin
   // relay (1.2–1.8 s direct, 2026-11-15; the relay hop adds its own fetch),
   // so prod fell back off a rung that would have connected.
-  webrtc: 10_000, // ICE + DTLS + datachannel open
+  webrtc: 30_000, // the calls POST queues through the pool like the WS lane
+  // (observed up to 17 s at prod lax 2026-11-18) + ICE gather + DTLS +
+  // datachannel open — 10 s expired with the channel milliseconds away
 }
 
 /** Largest single inbound websocket message accepted (server events are small JSON). */

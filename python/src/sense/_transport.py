@@ -39,7 +39,7 @@ log = logging.getLogger("sense")
 #: 2026-11-15; the relay hop adds its own fetch), so prod fell back off a
 #: rung that would have connected. WebRTC gets a longer budget for
 #: ICE + DTLS + datachannel open.
-TRANSPORT_DIAL_TIMEOUTS_S = {"quic": 5.0, "webrtc": 10.0}
+TRANSPORT_DIAL_TIMEOUTS_S = {"quic": 5.0, "webrtc": 30.0}
 
 #: Largest single inbound message (websocket frame / datachannel message)
 #: the client accepts. Server events are small JSON; this only bounds memory
@@ -582,7 +582,16 @@ class RtcWire(Wire):
         # announced ports (aiortc's default STUN adds a 5s gather timeout).
         pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=[]))
         self._pc = pc
-        dc = pc.createDataChannel("oai-events")
+        # The SFU binds oai-events to SCTP stream 0 OUT OF BAND (fixed sid,
+        # both directions) and writes raw JSON on it — no DCEP handshake (verified
+        # prod lax 2026-11-18: server events land as PPID-51 strings on stream 0
+        # within 200 ms of attach). A negotiated id-0 channel registers stream 0
+        # locally without DCEP, so those payloads are delivered to it, and SDK
+        # sends ride the same stream the SFU's producer reads. A client-DCEP
+        # channel on id 0 breaks under a duplicate OPEN (aiortc asserts; browsers
+        # ignore), and a negotiated id on any other stream drops every server
+        # event (stream 0 never registers).
+        dc = pc.createDataChannel("oai-events", negotiated=True, id=0)
         self._dc = dc
         # The SDK's media rides the event channel as JSON; the audio m-line
         # exists so the SFU's sendrecv merge can answer. We listen only.
@@ -632,7 +641,8 @@ class RtcWire(Wire):
             self._msgs.put_nowait(None)
 
     async def _wait_dc_open(self) -> None:
-        """Wait for the datachannel to open, raising if ICE or the connection fails."""
+        """Wait for the negotiated datachannel to go open (SCTP association up),
+        raising if ICE or the connection fails first."""
         while self._dc.readyState != "open":
             if self._pc.connectionState in ("failed", "closed"):
                 raise TransportFailed(
