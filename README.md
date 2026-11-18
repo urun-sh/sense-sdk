@@ -2,7 +2,7 @@
 
 Python and TypeScript SDKs for uRun's realtime decision model — Sense.
 
-Sense is a *realtime*, *multi-modal* System One model for voice and video agents and was inspired by the Jev model. It runs on continuously streaming media and answers questions about the input many times per second: for example, whether the user is still speaking or done, whether an interruption is a new question or just an "mmmhmm", and what the user's emotional state is.
+Sense is a *realtime*, *multi-modal* System One model for voice and video agents and was inspired by the Jev model. It runs on continuously streaming media and answers questions about the input many times per second: for example, whether the person is still speaking or done, whether an interruption is a new question or just an "mmmhmm", and what the person's emotional state is.
 
 The Sense SDK gives you one unified surface for perception, decision-making, and reactive agent control.
 
@@ -112,7 +112,7 @@ kind = app.choice(
 )
 ```
 
-If you want an ordered scale use a `score` — `criteria` is an ordered array of level descriptions, low end first (2..10), in this case the user's feeling will be graded in the range (0..4):
+If you want an ordered scale use a `score` — `criteria` is an ordered array of level descriptions, low end first (2..10), in this case the person's feeling will be graded in the range (0..4):
 
 ```python
 feeling = app.score(
@@ -219,7 +219,7 @@ const kind = app.choice(
 );
 ```
 
-If you want an ordered scale use a `score` — `criteria` is an ordered array of level descriptions, low end first (2..10), in this case the user's feeling will be graded in the range (0..4):
+If you want an ordered scale use a `score` — `criteria` is an ordered array of level descriptions, low end first (2..10), in this case the person's feeling will be graded in the range (0..4):
 
 ```ts
 const feeling = app.score("feeling", {
