@@ -18,6 +18,11 @@ export class Sense {
   private questions: Question[] = [];
   private whens: { pred: Predicate; handler: WaveHandler }[] = [];
   private waveHandlers: { handler: WaveHandler; opts: { coalesce?: boolean } }[] = [];
+  /** Sessions opened by this app, pruned of closed ones — the fan-out
+   * targets for handlers registered AFTER session() (prod evidence
+   * 2026-11-18: the console playground registers app.onWave after
+   * app.session() and silently never saw a wave). */
+  private sessions: Session[] = [];
 
   constructor(opts: SenseOptions = {}) {
     this.apiKey = opts.apiKey ?? envVar("URUN_API_KEY");
@@ -61,21 +66,28 @@ export class Sense {
   when(pred: Predicate, handler: WaveHandler): { cancel(): void } {
     const handle = { pred, handler };
     this.whens.push(handle);
+    // Live fan-out: sessions already opened from this app must see handlers
+    // registered after session() — the snapshot below only covers the past.
+    const cancels = this.liveSessions().map((s) => s.context.when(pred, handler).cancel);
     return {
       cancel: () => {
         this.whens = this.whens.filter((h) => h !== handle);
+        for (const cancel of cancels.splice(0)) cancel();
       },
     };
   }
 
   /** Observe waves on every session opened from here; `coalesce` skips
-   * consecutive same-argmax waves (latest wins). */
+   * consecutive same-argmax waves (latest wins). Registers on sessions that
+   * already exist too, so registration order vs session() never matters. */
   onWave(handler: WaveHandler, opts: { coalesce?: boolean } = {}): { cancel(): void } {
     const entry = { handler, opts };
     this.waveHandlers.push(entry);
+    const cancels = this.liveSessions().map((s) => s.context.onWave(handler, opts).cancel);
     return {
       cancel: () => {
         this.waveHandlers = this.waveHandlers.filter((h) => h !== entry);
+        for (const cancel of cancels.splice(0)) cancel();
       },
     };
   }
@@ -93,7 +105,14 @@ export class Sense {
     });
     for (const { pred, handler } of this.whens) s.context.when(pred, handler);
     for (const { handler, opts } of this.waveHandlers) s.context.onWave(handler, opts);
+    this.sessions.push(s);
     return s;
+  }
+
+  /** Open sessions of this app that are not closed yet. */
+  private liveSessions(): Session[] {
+    this.sessions = this.sessions.filter((s) => !s.closed);
+    return this.sessions;
   }
 }
 

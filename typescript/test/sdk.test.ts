@@ -1145,3 +1145,78 @@ describe("unknown_event keepalive muting", () => {
     await s.close();
   });
 });
+
+describe("Sense handler fan-out", () => {
+  /** Full-answer wave for the app's registry (same four questions as QUESTIONS). */
+  function appWave(app: Sense, waveId = 0): Wave {
+    const qs = app["questions"];
+    return Wave.decode(qs, {
+      wave_id: waveId,
+      t_ms: waveId * 40,
+      results: {
+        finished: { choice: true, probabilities: { true: 0.9, false: 0.1 }, confidence: 0.9 },
+        intent: { choice: "support", probabilities: { support: 0.8, sales: 0.1, other: 0.1 }, confidence: 0.8 },
+        urgency: { probabilities: { "0": 0.1, "1": 0.4, "2": 0.5 }, confidence: 0.7 },
+        actions: { choice: "respond", probabilities: { respond: 0.7, ignore: 0.2, wait: 0.1 }, confidence: 0.7 },
+      },
+    });
+  }
+
+  function registerQuestions(app: Sense): void {
+    app.noul("finished", { instructions: "finished?" });
+    app.choice("intent", { instructions: "What does the person want?", criteria: { support: "Help with a problem", sales: "Wants to buy", other: "Anything else" } });
+    app.score("urgency", { instructions: "How urgent is the request?", criteria: ["low", "medium", "high"] });
+    app.choice("actions", { instructions: "What should the agent do?", criteria: { respond: "Answer now", ignore: "Stay silent", wait: "Hold" } });
+  }
+
+  test("onWave registered AFTER session() still fires (prod 2026-11-18: it never did)", () => {
+    const app = new Sense({ apiKey: "sk-test" });
+    registerQuestions(app);
+    const s = app.session();
+    let waves = 0;
+    app.onWave(() => { waves++; }); // after session() — the console playground's order
+    s.context.ingest(appWave(app));
+    expect(waves).toBe(1);
+    s.context.ingest(appWave(app, 1));
+    expect(waves).toBe(2);
+    void s.close();
+  });
+
+  test("when() registered AFTER session() fires and cancels cleanly", () => {
+    const app = new Sense({ apiKey: "sk-test" });
+    registerQuestions(app);
+    const s = app.session();
+    let fired = 0;
+    const handle = app.when(Predicate("eq", { type: "top", question: "actions" }, "respond"), () => { fired++; });
+    s.context.ingest(appWave(app));
+    expect(fired).toBe(1);
+    handle.cancel();
+    s.context.ingest(appWave(app, 1));
+    expect(fired).toBe(1); // edge-triggered AND cancelled: no second fire
+    void s.close();
+  });
+
+  test("onWave cancel removes the handler from live sessions", () => {
+    const app = new Sense({ apiKey: "sk-test" });
+    registerQuestions(app);
+    const s = app.session();
+    let waves = 0;
+    const handle = app.onWave(() => { waves++; });
+    s.context.ingest(appWave(app));
+    expect(waves).toBe(1);
+    handle.cancel();
+    s.context.ingest(appWave(app, 1));
+    expect(waves).toBe(1);
+    void s.close();
+  });
+
+  test("closed sessions are dropped from the fan-out list", () => {
+    const app = new Sense({ apiKey: "sk-test" });
+    registerQuestions(app);
+    const s = app.session();
+    void s.close();
+    let waves = 0;
+    app.onWave(() => { waves++; }); // must not throw against the closed session
+    expect(waves).toBe(0);
+  });
+});
