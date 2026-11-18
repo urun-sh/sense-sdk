@@ -1,6 +1,6 @@
 {
   "name": "@urun-sh/sense",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "TypeScript SDK for the Sense realtime question stream",
   "license": "Apache-2.0",
   "author": "Urun Platform, Inc",
@@ -56,5 +56,8 @@
     "jscpd": "^5.4.2",
     "oxlint": "^1.91.0",
     "typescript": "^5.9.0"
+  },
+  "optionalDependencies": {
+    "@fails-components/webtransport-transport-http3-quiche": "^1.6.12"
   }
 }
