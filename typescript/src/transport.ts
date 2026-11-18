@@ -712,6 +712,7 @@ export class RtcWire implements Wire {
         return
       }
       this.messageCb?.(typeof data === 'string' ? data : new TextDecoder().decode(data as ArrayBuffer))
+      if (typeof data === 'string') wdbg(`S→C ${wireType(data)} ${data.length}B`)
     }
     dc.onclose = () => this.closeCb?.()
     pc.onconnectionstatechange = () => {
@@ -756,7 +757,9 @@ export class RtcWire implements Wire {
 
   sendJson(obj: unknown): void {
     if (this.dc === null || this.dc.readyState !== 'open') throw new TransportDialError('webrtc wire closed')
-    this.dc.send(JSON.stringify(obj))
+    const line = JSON.stringify(obj)
+    wdbg(`C→S ${wireType(line)} ${line.length}B`)
+    this.dc.send(line)
   }
 
   onMessage(cb: (raw: string) => void): void {

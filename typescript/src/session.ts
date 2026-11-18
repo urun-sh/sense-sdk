@@ -468,6 +468,7 @@ export class Session {
       throw new ProtocolError("protocol", "session closed while connecting");
     }
     this.wire = wire;
+    this.wdbg(`wire installed kind=${wire.kind}`);
     this.connectedAt = Date.now();
     this.streamsEnded = false;
     this.wedgeRefusals = 0;
@@ -601,6 +602,7 @@ export class Session {
   }
 
   private onMessage(raw: string): void {
+    if (this.wdbgCount <= 3) this.wdbg(`onMessage raw first80=${raw.slice(0, 80)}`);
     let msg: Record<string, unknown>;
     try {
       msg = JSON.parse(raw) as Record<string, unknown>;
@@ -636,8 +638,21 @@ export class Session {
     return false;
   }
 
+  /** Wave-assembly debugging, same opt-in as the wire frame log. */
+  private wdbgCount = 0;
+  private wdbg(msg: string): void {
+    const g = globalThis as typeof globalThis & { __SENSE_WIRE_DEBUG?: boolean }
+    if (g.__SENSE_WIRE_DEBUG !== true) return
+    console.log(`[sense-session ${new Date().toISOString()}] ${msg}`)
+  }
+
   private onDeltaMessage(msg: Record<string, unknown>): void {
-    for (const line of String(msg.delta ?? "").split("\n")) this.onDecisionLine(line);
+    for (const line of String(msg.delta ?? "").split("\n")) {
+      this.wdbgCount++;
+      if (this.wdbgCount <= 2) this.wdbg(`delta#${this.wdbgCount} first120=${line.slice(0, 120)}`);
+      else if (this.wdbgCount % 500 === 0) this.wdbg(`delta#${this.wdbgCount}`);
+      this.onDecisionLine(line);
+    }
   }
 
   private onTurnCompleted(): void {
@@ -757,9 +772,13 @@ export class Session {
       return;
     }
     const qid = String(ev.id ?? ev.question ?? "");
-    if (!qid) return;
+    if (!qid) {
+      this.wdbg(`decision line matched but NO qid: ${trimmed.slice(0, 100)}`);
+      return;
+    }
     if (this.accumulator.has(qid)) this.flushAccumulator();
     this.accumulator.set(qid, ev);
+    if (this.wdbgCount <= 3 || this.wdbgCount % 200 === 0) this.wdbg(`decision accumulated qid=${qid} size=${this.accumulator.size}`);
     // The wave's tMs is the decision's MEDIA timestamp (protocol §6).
     // audio_t_ms IS that position on every seat since 2026-11-05; older
     // seats stamped per-wave COMPUTE time in t_ms — prefer the position.
