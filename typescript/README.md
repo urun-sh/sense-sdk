@@ -91,7 +91,7 @@ const feeling = app.score("feeling", {
 });
 ```
 
-**Open a session and start reading waves:** `session.run()` dials on first read and yields `waves`. A wave is a batch of decisions taken over the last slice of audio:
+**Open a session and start reading waves:** the session drive — dial, turn-open loop, wave assembly — starts at whichever of `session.attach()` or `session.run()` runs first (the second is a no-op), so handler-only sessions work with no run loop at all. `run()` yields `waves`. A wave is a batch of decisions taken over the last slice of audio:
 
 ```ts
 const session = app.session();

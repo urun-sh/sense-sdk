@@ -960,3 +960,135 @@ describe("explicit presence", () => {
     }
   });
 });
+
+// -- the session drive: attach() starts the session ---------------------------
+
+const driveDecisionLine = (id: string, body: Record<string, unknown>): string =>
+  JSON.stringify({ event: "sense.decision", id, t_ms: 0, ...body });
+const driveNoulLine = (id: string, v: boolean): string =>
+  driveDecisionLine(id, { choice: v, probabilities: { true: v ? 0.9 : 0.1, false: v ? 0.1 : 0.9 }, confidence: 0.9 });
+const driveChoiceLine = (id: string, v: string): string =>
+  driveDecisionLine(id, { choice: v, probabilities: { support: 0.8, sales: 0.1, other: 0.1 }, confidence: 0.8 });
+const driveScoreLine = (): string =>
+  driveDecisionLine("urgency", { probabilities: { "0": 0.9, "1": 0.08, "2": 0.02 }, confidence: 0.85 });
+/** One complete wave (every registered question answered) over the fake wire. */
+function driveDeliverWave(w: FakeWire, intent: string, actions: string): void {
+  w.emit({
+    type: "response.output_text.delta",
+    delta: [driveNoulLine("finished", true), driveChoiceLine("intent", intent), driveScoreLine(), driveChoiceLine("actions", actions)].join("\n"),
+  });
+  w.emit({ type: "response.completed" });
+}
+async function driveWaitFor(check: () => boolean, ms = 2_000): Promise<void> {
+  for (let i = 0; i < ms / 25 && !check(); i++) await new Promise((r) => setTimeout(r, 25));
+  if (!check()) throw new Error("condition not met in time");
+}
+
+describe("session drive (attach starts the session)", () => {
+
+  test("handler-only session: attach() dials, turns open, handlers fire with no run()", async () => {
+    const keys: string[] = [];
+    const wires: FakeWire[] = [];
+    const s = new Session({ apiKey: "k", questions: QUESTIONS, wireFactory: recordingFactory(keys, wires) });
+    const observed: number[] = [];
+    const edges: number[] = [];
+    s.context.onWave((c) => observed.push(c.latest()!.waveId));
+    s.context.when(Predicate({ type: "q", id: "finished" }), (c) => edges.push(c.latest()!.waveId));
+    await s.attach({ audio: [new Uint8Array(1920)] });
+    await driveWaitFor(() => wires.length === 1);
+    expect(keys).toEqual(["k"]); // attach dialed exactly once
+    await driveWaitFor(() => sentHas(wires[0]!, "response.create")); // the drive opened the turn
+    driveDeliverWave(wires[0]!, "support", "respond");
+    await driveWaitFor(() => observed.length >= 1);
+    expect(observed).toEqual([0]);
+    expect(edges).toEqual([0]); // edge handlers fire with no run() consumer
+    await s.close();
+  });
+
+  test("run() + handlers: each wave is yielded once and delivered to handlers once", async () => {
+    const keys: string[] = [];
+    const wires: FakeWire[] = [];
+    const s = new Session({ apiKey: "k", questions: QUESTIONS, wireFactory: recordingFactory(keys, wires) });
+    const observed: number[] = [];
+    const yielded: number[] = [];
+    s.context.onWave((c) => observed.push(c.latest()!.waveId));
+    void (async () => {
+      for await (const wave of s.run()) yielded.push(wave.waveId);
+    })();
+    await s.attach({ audio: [new Uint8Array(1920)] }); // input opens the turn; run() started the drive
+    await driveWaitFor(() => sentHas(wires[0]!, "response.create"));
+    driveDeliverWave(wires[0]!, "support", "respond");
+    await driveWaitFor(() => yielded.length >= 1);
+    driveDeliverWave(wires[0]!, "sales", "wait");
+    await driveWaitFor(() => yielded.length >= 2);
+    expect(yielded).toEqual([0, 1]); // every wave exactly once
+    expect(observed).toEqual([0, 1]); // handlers fired exactly once per wave
+    await s.close();
+  });
+
+  test("attach-before-run: one dial, the pre-run wave still arrives", async () => {
+    const keys: string[] = [];
+    const wires: FakeWire[] = [];
+    const s = new Session({ apiKey: "k", questions: QUESTIONS, wireFactory: recordingFactory(keys, wires) });
+    const yielded: number[] = [];
+    await s.attach({ audio: [new Uint8Array(1920)] });
+    await driveWaitFor(() => wires.length === 1);
+    void (async () => {
+      for await (const wave of s.run()) yielded.push(wave.waveId);
+    })();
+    driveDeliverWave(wires[0]!, "support", "respond");
+    await driveWaitFor(() => yielded.length >= 1);
+    expect(yielded).toEqual([0]); // the pre-run wave was queued, not lost
+    expect(keys.length).toBe(1); // no second dial
+    await s.close();
+  });
+
+  test("run-before-attach: one dial, attach joins the running drive", async () => {
+    const keys: string[] = [];
+    const wires: FakeWire[] = [];
+    const s = new Session({ apiKey: "k", questions: QUESTIONS, wireFactory: recordingFactory(keys, wires) });
+    const observed: number[] = [];
+    s.context.onWave((c) => observed.push(c.latest()!.waveId));
+    void (async () => {
+      for await (const _ of s.run()) {
+        // discard
+      }
+    })();
+    await driveWaitFor(() => wires.length === 1);
+    await s.attach({ audio: [new Uint8Array(1920)] });
+    await driveWaitFor(() => sentHas(wires[0]!, "response.create"));
+    driveDeliverWave(wires[0]!, "support", "respond");
+    await driveWaitFor(() => observed.length >= 1);
+    expect(observed).toEqual([0]);
+    expect(keys.length).toBe(1); // attach() joined the running drive, no second dial
+    await s.close();
+  });
+
+  test("close() ends a parked run() consumer; the drive stops with it", async () => {
+    const wires: FakeWire[] = [];
+    const s = new Session({ apiKey: "k", questions: QUESTIONS, wireFactory: recordingFactory([], wires) });
+    const it = s.run()[Symbol.asyncIterator]();
+    void it.next(); // parks the consumer (the drive is live)
+    await driveWaitFor(() => wires.length === 1);
+    await s.close();
+    expect((await it.next()).done).toBe(true);
+  });
+
+  test("a credits fatality surfaces through run() and ends the drive", async () => {
+    const wires: FakeWire[] = [];
+    const s = new Session({ apiKey: "k", questions: QUESTIONS, wireFactory: recordingFactory([], wires) });
+    const it = s.run()[Symbol.asyncIterator]();
+    const next = it.next(); // parks the consumer
+    await driveWaitFor(() => wires.length === 1);
+    wires[0]!.emit({
+      type: "error",
+      event_id: "e1",
+      error: { code: "insufficient_credits", message: "the organization is out of credits — top up to continue" },
+    });
+    await expect(next).rejects.toBeInstanceOf(OutOfCreditsError);
+    // The drive is over: no further turn-opens after the fatal end.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(wires[0]!.sent.filter((m) => hasType(m) && m.type === "response.create").length).toBe(0);
+    await s.close();
+  });
+});
