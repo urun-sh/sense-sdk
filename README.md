@@ -127,7 +127,7 @@ and yields `waves`. A wave is a batch of decisions taken over the last slice of 
 
 ```python
 session = app.session()
-waves = session.run()  # returns async iterator
+waves = session.run()  # returns async iterator; iterates the one session drive that attach() or run() starts
 
 
 async def read_waves(waves):
