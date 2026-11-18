@@ -9,7 +9,7 @@ import json
 import aiohttp
 import pytest
 import sense._session as _session_module
-from sense import ProtocolError, Sense, Session
+from sense import ProtocolError, Question, QuestionKind, Sense, Session
 from sense._core import Context, Wave, WaveAssembler
 from sense._session import MAX_PENDING_AUDIO_CHUNKS, _http_session
 from sense._transport import (
@@ -32,9 +32,18 @@ GOOD = {
 
 def _session() -> Session:
     s = Session(api_key="k")
-    s.add_question("cheese", "noul", "?")
-    s.add_question("kind", "choice", "?", options=["brie", "feta"])
-    s.add_question("feel", "score", "?", levels=["lo", "hi"])
+    s.set_questions(
+        [
+            Question(name="cheese", kind=QuestionKind.NOUL, instructions="cheese?"),
+            Question(
+                name="kind",
+                kind=QuestionKind.CHOICE,
+                instructions="kind?",
+                criteria={"brie": "Soft white-rind cheese", "feta": "Crumbly brined cheese"},
+            ),
+            Question(name="feel", kind=QuestionKind.SCORE, instructions="feel?", criteria=["lo", "hi"]),
+        ]
+    )
     return s
 
 
@@ -290,7 +299,7 @@ def test_raising_predicate_does_not_end_the_session():
     kind = s.questions[1]
     fired = []
     s.when(kind.p("missing-option") > 0.5, lambda ctx: None)
-    s.onWave(lambda ctx: fired.append(1))
+    s.on_wave(lambda ctx: fired.append(1))
     waves = asyncio.run(_drive(s, _wave_lines()))
     assert len(waves) == 1
     assert fired == [1]

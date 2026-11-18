@@ -28,7 +28,7 @@ function result(
   return new Result({ id, kind, waveId: 7, value, p, confidence: 1, distribution, top: String(value) });
 }
 
-const FEELING_LEVELS = ["hate", "dislike", "meh", "like", "love"];
+const FEELING_LEVELS = ["disgusted", "negative", "neutral", "positive", "delighted"];
 
 /** A score result whose name-keyed dist is mapped onto the feeling levels. */
 function scoreResult(dist: Record<string, number>): Score {
@@ -50,34 +50,34 @@ function cheeseWave(p: number, kindDist: Record<string, number>, feelingDist: Re
 
 describe("toVerdict", () => {
   test("talking threshold: not cheese below 0.6", () => {
-    const verdict = toVerdict(cheeseWave(0.59, { cheddar: 0.9 }, { love: 0.9 }));
+    const verdict = toVerdict(cheeseWave(0.59, { cheddar: 0.9 }, { delighted: 0.9 }));
     if (verdict.talking) throw new Error("expected talking=false at p=0.59");
     expect(verdict.speaking).toBe(true);
     expect("kind" in verdict).toBe(false);
   });
 
   test("talking threshold: cheese at exactly 0.6", () => {
-    const verdict = toVerdict(cheeseWave(0.6, { cheddar: 0.9 }, { love: 0.9, like: 0.1 }));
+    const verdict = toVerdict(cheeseWave(0.6, { cheddar: 0.9 }, { delighted: 0.9, positive: 0.1 }));
     if (!verdict.talking) throw new Error("expected talking=true at p=0.6");
     expect(verdict.p).toBe(0.6);
     expect(verdict.kind).toBe("cheddar");
-    expect(verdict.feeling).toBe("love");
+    expect(verdict.feeling).toBe("delighted");
     expect(verdict.score).toBeCloseTo(3.9);
     expect(verdict.waveId).toBe(7);
   });
 
   test("kind falls back to 'unknown type' below 0.6", () => {
-    const verdict = toVerdict(cheeseWave(0.9, { cheddar: 0.59, other: 0.41 }, { love: 0.9 }));
+    const verdict = toVerdict(cheeseWave(0.9, { cheddar: 0.59, other: 0.41 }, { delighted: 0.9 }));
     if (!verdict.talking) throw new Error("expected talking=true at p=0.9");
     expect(verdict.kind).toBe("unknown type");
-    expect(verdict.feeling).toBe("love");
+    expect(verdict.feeling).toBe("delighted");
   });
 
-  test("feeling falls back to 'meh' below 0.6", () => {
-    const verdict = toVerdict(cheeseWave(0.9, { cheddar: 0.9 }, { love: 0.59, meh: 0.41 }));
+  test("feeling falls back to 'neutral' below 0.6", () => {
+    const verdict = toVerdict(cheeseWave(0.9, { cheddar: 0.9 }, { delighted: 0.59, neutral: 0.41 }));
     if (!verdict.talking) throw new Error("expected talking=true at p=0.9");
     expect(verdict.kind).toBe("cheddar");
-    expect(verdict.feeling).toBe("meh");
+    expect(verdict.feeling).toBe("neutral");
   });
 
   test("speaking follows the speech result, not the cheese detection", () => {
@@ -85,7 +85,7 @@ describe("toVerdict", () => {
       speech: result("speech", "noul", false, 0, { true: 0, false: 1 }),
       cheese: result("cheese", "noul", false, 0.2, { true: 0.2, false: 0.8 }),
       cheese_type: result("cheese_type", "choice", "cheddar", 0.5, { cheddar: 0.5 }),
-      feeling: scoreResult({ meh: 0.5 }),
+      feeling: scoreResult({ neutral: 0.5 }),
     });
     const verdict = toVerdict(silent);
     expect(verdict.speaking).toBe(false);

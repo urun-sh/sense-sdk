@@ -1,8 +1,8 @@
-"""Jev-style option description maps: options as a name -> description dict
-alongside the existing string[]/pair forms (no breaking change)."""
+"""Jev criteria shapes: one syntax per kind — name first, instructions and
+criteria, descriptions on every option. Nothing else is accepted."""
 
 import pytest
-from sense import Question, QuestionKind, Sense
+from sense import Sense
 
 
 @pytest.fixture()
@@ -11,18 +11,19 @@ def app():
 
 
 def envelope(q):
-    return {"questions": {q.id: q.to_envelope()}, "hz": 25.0}
+    return {"questions": {q.name: q.to_envelope()}, "hz": 12.5}
 
 
 def test_choice_criteria_map(app):
     q = app.choice(
-        "Which team should handle this?",
-        {"returns": "Exchanges, wrong or damaged items", "billing": "Payment questions"},
+        "route",
+        instructions="Which team should handle this?",
+        criteria={"returns": "Exchanges, wrong or damaged items", "billing": "Payment questions"},
     )
-    assert list(q.options) == ["returns", "billing"]
-    assert envelope(q)["questions"]["which_team_should_handle_this"] == {
-        "kind": "choice",
-        "prompt": "Which team should handle this?",
+    assert list(q.criteria) == ["returns", "billing"]
+    assert envelope(q)["questions"]["route"] == {
+        "type": "choice",
+        "instructions": "Which team should handle this?",
         "criteria": {
             "returns": "Exchanges, wrong or damaged items",
             "billing": "Payment questions",
@@ -30,45 +31,50 @@ def test_choice_criteria_map(app):
     }
 
 
-def test_score_criteria_map_insertion_order_is_ordinal(app):
+def test_score_criteria_array_insertion_order_is_ordinal(app):
     q = app.score(
-        "How calm is the speaker?",
-        {"agitated": "Clearly worked up", "neutral": "Neither", "calm": "Relaxed"},
+        "calm",
+        instructions="How calm is the speaker?",
+        criteria=["Clearly worked up", "Neither", "Relaxed"],
     )
-    assert list(q.levels) == ["agitated", "neutral", "calm"]
-    assert envelope(q)["questions"]["how_calm_is_the_speaker"]["criteria"] == {
-        "agitated": "Clearly worked up",
-        "neutral": "Neither",
-        "calm": "Relaxed",
+    assert list(q.criteria) == ["Clearly worked up", "Neither", "Relaxed"]
+    assert envelope(q)["questions"]["calm"]["criteria"] == [
+        "Clearly worked up",
+        "Neither",
+        "Relaxed",
+    ]
+
+
+def test_noul_criteria_optional_and_true_false_shaped(app):
+    bare = app.noul("speech", instructions="Is someone speaking right now?")
+    assert envelope(bare)["questions"]["speech"] == {
+        "type": "noul",
+        "instructions": "Is someone speaking right now?",
+    }
+    described = app.noul(
+        "done",
+        instructions="Is the person done?",
+        criteria={"true": "The thought is complete", "false": "Still mid-thought"},
+    )
+    assert envelope(described)["questions"]["done"]["criteria"] == {
+        "true": "The thought is complete",
+        "false": "Still mid-thought",
     }
 
 
-def test_noul_options_map(app):
-    q = app.noul(
-        "Is the user done?", id="done", options={"yes": "Finished", "no": "More to come"}
-    )
-    assert list(q.options) == ["yes", "no"]
-    # noul keeps the documented [name, description] pair form (protocol §2),
-    # canonicalized to no-first: the first option is the false arm.
-    assert envelope(q)["questions"]["done"]["options"] == [
-        ["no", "More to come"],
-        ["yes", "Finished"],
-    ]
+def test_criteria_shapes_are_enforced(app):
+    # Jev's shapes only: map criteria for choice, {true,false} for noul,
+    # an ordered description array for score. No bare name lists, no ids.
+    with pytest.raises(ValueError):
+        app.choice("x", instructions="want?", criteria=["support", "other"])
+    with pytest.raises(ValueError):
+        app.noul("x", instructions="?", criteria={"yes": "label", "no": "label"})
+    with pytest.raises(ValueError):
+        app.score("x", instructions="?", criteria={"low": "label", "high": "label"})
+    with pytest.raises(ValueError):
+        app.score("x", instructions="?", criteria=["only one"])
 
 
-def test_string_list_overloads_unchanged():
-    choice = Question(id="c", kind=QuestionKind.CHOICE, options=["a", "b"])
-    score = Question(id="s", kind=QuestionKind.SCORE, levels=["low", "high"])
-    env = {"questions": {q.id: q.to_envelope() for q in (choice, score)}}
-    # python sends choice options as {name, description} objects (its
-    # long-standing wire form).
-    assert env["questions"]["c"]["options"] == [
-        {"name": "a", "description": ""},
-        {"name": "b", "description": ""},
-    ]
-    assert env["questions"]["s"]["criteria"] == ["low", "high"]
-
-
-def test_score_map_still_validates_range(app):
+def test_score_range_validated(app):
     with pytest.raises(ValueError, match="2..10"):
-        app.score("Too few?", {"one": "only"})
+        app.score("x", instructions="Too few?", criteria=["only"])

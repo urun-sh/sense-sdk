@@ -1,9 +1,9 @@
 {
   "questions": {
-    "finished": {"kind": "noul", "prompt": "Did the current speaker just finish their turn?"},
-    "user_speaking": {"kind": "noul", "prompt": "Is a human speaking right now?"},
-    "intent": {"kind": "choice", "prompt": "What does the user want?", "options": ["support", "sales", "other"]},
-    "actions": {"kind": "choice", "prompt": "What should the agent do?", "options": ["respond", "ignore", "wait"]},
-    "urgency": {"kind": "score", "prompt": "How urgent is the request?", "levels": ["low", "medium", "high"]}
+    "finished": {"type": "noul", "instructions": "Did the current speaker just finish their turn?"},
+    "user_speaking": {"type": "noul", "instructions": "Is a human speaking right now?"},
+    "intent": {"type": "choice", "instructions": "What does the person want?", "criteria": {"support": "Technical help with the product", "sales": "Pricing, plans, buying", "other": "Anything else"}},
+    "actions": {"type": "choice", "instructions": "What should the agent do?", "criteria": {"respond": "Answer the person now", "ignore": "Stay quiet; nothing is addressed to the agent", "wait": "Let the person finish before deciding"}},
+    "urgency": {"type": "score", "instructions": "How urgent is the request?", "criteria": ["routine, can wait", "time sensitive today", "blocking, act now"]}
   }
 }

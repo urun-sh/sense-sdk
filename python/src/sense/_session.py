@@ -13,11 +13,12 @@ import base64
 import inspect
 import json
 import logging
+import math
 import os
 import time
 import urllib.parse
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,7 +30,6 @@ from ._core import (
     Predicate,
     ProtocolError,
     Question,
-    QuestionKind,
     Result,
     Wave,
     WaveAssembler,
@@ -94,7 +94,7 @@ MAX_PENDING_TEXT_ITEMS = 256
 PRESENCE_IDLE_S = 60.0
 PRESENCE_CADENCE_S = 10.0
 
-__all__ = ["AudioInput", "Session", "SessionStats", "TextInput", "VideoInput"]
+__all__ = ["AttachHandle", "AudioInput", "Session", "SessionStats", "TextInput", "VideoInput"]
 
 
 class SenseUnavailable(RuntimeError):
@@ -164,8 +164,25 @@ class TextInput:
         self._s._enqueue_text(text)
 
 
+class AttachHandle:
+    """Cancels the input pumps one :meth:`Session.attach` call started."""
+
+    __slots__ = ("_tasks",)
+
+    def __init__(self, tasks: list[asyncio.Task]) -> None:
+        self._tasks = tasks
+
+    def detach(self) -> None:
+        for t in self._tasks:
+            t.cancel()
+
+
 class Session:
     DEFAULT_BASE_URL = "https://inference.urun.sh"
+    #: One seat's sustained floor on the serving GPU is ~12.5 Hz (<80 ms/tick
+    #: is the owner's ruling); a faster request coalesces to the newest media
+    #: and just realizes fewer waves. 12.5 is the default AND the ceiling.
+    MAX_HZ = 12.5
 
     def __init__(  # noqa: PLR0913 - public options; allow_insecure is a keyword-only opt-in
         self,
@@ -190,6 +207,12 @@ class Session:
         )
         self.model = model
         self.hz = float(hz)
+        if not math.isfinite(self.hz) or not 0 < self.hz <= self.MAX_HZ:
+            raise ValueError(
+                f"hz must be in (0, {self.MAX_HZ}] waves per second, got {hz!r}: 12.5 is one"
+                " seat's sustained floor; a faster request coalesces to the newest media"
+                " and just realizes fewer waves"
+            )
         self.questions: list[Question] = []
         self._closed = False
         self.stats = SessionStats()
@@ -204,6 +227,7 @@ class Session:
         self._wake: asyncio.Event | None = None
         self._out_lock = asyncio.Lock()  # one writer at a time on the wire
         self._turn_open = False
+        self._pumps: list[asyncio.Task] = []  # attach()ed input pumps
         self._loop: asyncio.AbstractEventLoop | None = None
         self._wire: Wire | None = None
         self.audio = AudioInput(self)
@@ -215,26 +239,45 @@ class Session:
 
     # -- registration ------------------------------------------------------
 
-    def add_question(
-        self,
-        qid: str,
-        kind: QuestionKind | str,
-        prompt: str = "",
-        options: Any = None,
-        levels: Any = None,
-    ) -> Question:
-        q = Question(id=qid, kind=QuestionKind(kind), prompt=prompt, options=options, levels=levels)
-        # Replacing a duplicate id keeps registration idempotent (parity with
-        # TS addQuestion) — the last registration wins.
+    def _register(self, q: Question) -> Question:
+        # Replacing a duplicate name keeps registration idempotent — the last
+        # registration wins.
         for i, old in enumerate(self.questions):
-            if old.id == qid:
+            if old.name == q.name:
                 self.questions[i] = q
                 return q
         self.questions.append(q)
         return q
 
+    def set_questions(self, questions: Iterable[Question]) -> None:
+        """Replace the whole question registry (adds, edits AND removals) and
+        re-latch the schema: barges in and re-sends ``session.update`` so the
+        next turn uses the new envelope (TS parity). Call from async code
+        (inside the run loop or before ``run()`` with a running loop)."""
+        self.questions = []
+        for q in questions:
+            self._register(q)
+        wire = self._wire
+        if wire is None or self._closed or wire.closed:
+            return
+        self._barge_in()
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            raise RuntimeError("set_questions() on a live session needs a running event loop")
+        loop.create_task(self._send(wire, self._session_update()))
+
+    def _session_update(self) -> dict:
+        return {
+            "type": "session.update",
+            "session": {
+                "model": self.model,
+                "modalities": ["text"],
+                "instructions": json.dumps(self._envelope()),
+            },
+        }
+
     def _envelope(self) -> dict:
-        return {"questions": {q.id: q.to_envelope() for q in self.questions}, "hz": self.hz}
+        return {"questions": {q.name: q.to_envelope() for q in self.questions}, "hz": self.hz}
 
     # -- delegation to the context -----------------------------------------
 
@@ -247,7 +290,7 @@ class Session:
     def when(self, pred: Predicate, handler: Callable, *, source: str | None = None) -> Any:
         return self._ctx.when(pred, handler, source=source)
 
-    def onWave(
+    def on_wave(
         self, handler: Callable, coalesce: bool = False, *, source: str | None = None
     ) -> None:
         """Observe waves. ``coalesce=True`` skips consecutive same-argmax
@@ -487,16 +530,37 @@ class Session:
             self.stats.errors += 1
             log.exception("[sense] input pump failed")
 
-    async def _pump_inputs(self, audio: Any, video: Any, text: Any) -> None:
-        pumps = []
-        if audio is not None:
-            pumps.append(asyncio.create_task(self._pump_one(audio, self.audio.push)))
-        if video is not None:
-            pumps.append(asyncio.create_task(self._pump_one(video, self.video.push)))
-        if text is not None:
-            pumps.append(asyncio.create_task(self._pump_one(text, self.text.push)))
-        if pumps:
-            await asyncio.gather(*pumps)
+    def attach(self, audio: Any = None, video: Any = None, text: Any = None) -> AttachHandle:
+        """The ONE canonical way to stream inputs into the session.
+
+        Each source accepts an async iterable, a sync iterable, or a
+        zero-arg callable returning the next chunk (``None`` ends): audio
+        chunks are raw PCM16 24 kHz mono bytes, video chunks are JPEG bytes,
+        text chunks are strings. Chunks are queued and drained onto the wire
+        while the lane is live; ``run()``/``waves()`` consume the waves.
+
+        Call it from async code (before or during ``run()``); the pumps stop
+        when the session closes or the returned handle is ``detach()``ed."""
+        if self._closed:
+            raise RuntimeError("session is closed")
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "attach() needs a running event loop — call it from async code "
+                "(before or during session.run())"
+            ) from exc
+        tasks = [
+            loop.create_task(self._pump_one(src, push), name=f"sense-attach-{what}")
+            for what, src, push in (
+                ("audio", audio, self.audio.push),
+                ("video", video, self.video.push),
+                ("text", text, self.text.push),
+            )
+            if src is not None
+        ]
+        self._pumps.extend(tasks)
+        return AttachHandle(tasks)
 
     # -- connect / reconnect ---------------------------------------------------
 
@@ -678,17 +742,7 @@ class Session:
             await wire.send(payload)
 
     async def _hello(self, wire) -> None:
-        await self._send(
-            wire,
-            {
-                "type": "session.update",
-                "session": {
-                    "model": self.model,
-                    "modalities": ["text"],
-                    "instructions": json.dumps(self._envelope()),
-                },
-            },
-        )
+        await self._send(wire, self._session_update())
         if self._transcript:
             await self._send(wire, self._text_item(self._transcript))
 
@@ -742,20 +796,12 @@ class Session:
 
     # -- the wire loop ----------------------------------------------------------
 
-    async def run(
-        self,
-        audio: Any = None,
-        video: Any = None,
-        text: Any = None,
-    ) -> AsyncIterator[Wave]:
+    async def run(self) -> AsyncIterator[Wave]:
         """Drive the session: connect, register questions, keep a cadence turn
-        open, assemble waves, and yield them. ``audio``/``video``/``text``
-        accept async iterators, sync iterables, or zero-arg callables
-        returning the next chunk (None ends); chunks go to the matching
-        input's ``push``."""
+        open, assemble waves, and yield them. Stream inputs in with
+        :meth:`attach` — the one canonical input path."""
         self._wake = asyncio.Event()
         self._loop = asyncio.get_running_loop()
-        pump = asyncio.create_task(self._pump_inputs(audio, video, text))
         sender = asyncio.create_task(self._sender())
         presence = asyncio.create_task(self._presence_loop())
         try:
@@ -782,22 +828,17 @@ class Session:
                     except Exception:
                         pass
         finally:
-            pump.cancel()
+            pumps, self._pumps = self._pumps, []
+            for t in pumps:
+                t.cancel()
             sender.cancel()
             presence.cancel()
             self._wake = None
-            try:
-                await pump
-            except (asyncio.CancelledError, Exception):
-                pass
-            try:
-                await sender
-            except (asyncio.CancelledError, Exception):
-                pass
-            try:
-                await presence
-            except (asyncio.CancelledError, Exception):
-                pass
+            for t in [*pumps, sender, presence]:
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
 
     async def _run_wire_loop(self, asm: WaveAssembler, wire) -> AsyncIterator[Wave]:
         """Consume wire messages until the lane ends; yield assembled waves."""
@@ -930,6 +971,9 @@ class Session:
         (firing its ``on_cancel`` hook) BEFORE tearing down the wire, so a
         reply never completes after the app believes the session is dead."""
         self._closed = True
+        pumps, self._pumps = self._pumps, []
+        for t in pumps:
+            t.cancel()
         for key in list(self._ctx._tasks):
             self._ctx.cancel(key, barge_in=False)
         for sink in list(self._wave_sinks):

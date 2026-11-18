@@ -44,8 +44,9 @@ export class Result {
     return this.distribution[name] ?? 0;
   }
 
-  /** Only valid on score results: Σ p over levels >= the given level. */
-  pAtLeast(level: string): number {
+  /** Only valid on score results: Σ p over levels >= the given level
+   * (a zero-based index or the exact level description). */
+  pAtLeast(level: number | string): number {
     throw new ProtocolError("protocol", `pAtLeast(${level}) on non-score question ${this.id}`);
   }
 }
@@ -64,6 +65,8 @@ export class Score extends Result {
     probs: Record<string, number>;
     levels: string[];
     confidence: number;
+    /** The level description the server echoed back as the choice, when given. */
+    echo?: string;
   }) {
     const byName: Record<string, number> = {};
     let expected = 0;
@@ -74,7 +77,9 @@ export class Score extends Result {
       expected += i * p;
       if (p > (init.probs[String(bestIdx)] ?? 0)) bestIdx = i;
     });
-    const level = init.levels[bestIdx] ?? "";
+    // The level label is the DESCRIPTION text: the server echoes the chosen
+    // description back as the choice; without an echo it is the argmax level.
+    const level = init.echo ?? init.levels[bestIdx] ?? "";
     super({
       id: init.id,
       kind: "score",
@@ -89,10 +94,10 @@ export class Score extends Result {
     this.level = level;
   }
 
-  override pAtLeast(level: string): number {
-    const idx = this.levels.indexOf(level);
-    if (idx < 0) {
-      throw new ProtocolError("protocol", `unknown level "${level}" for ${this.id}`);
+  override pAtLeast(level: number | string): number {
+    const idx = typeof level === "number" ? level : this.levels.indexOf(level);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= this.levels.length) {
+      throw new ProtocolError("protocol", `unknown level ${JSON.stringify(level)} for ${this.id}`);
     }
     let sum = 0;
     for (let i = idx; i < this.levels.length; i++) {
@@ -144,14 +149,14 @@ export class Wave {
     const incoming = raw.results as Record<string, unknown>;
     const results: Record<string, Result> = {};
     for (const q of questions) {
-      const ans = incoming[q.id];
+      const ans = incoming[q.name];
       if (ans === undefined) {
-        throw new ProtocolError("missing_answer", `wave has no answer for registered question "${q.id}"`);
+        throw new ProtocolError("missing_answer", `wave has no answer for registered question "${q.name}"`);
       }
-      results[q.id] = decodeResult(q, ans, numOr(raw.wave_id, 0));
+      results[q.name] = decodeResult(q, ans, numOr(raw.wave_id, 0));
     }
     for (const qid of Object.keys(incoming)) {
-      if (!questions.some((q) => q.id === qid)) {
+      if (!questions.some((q) => q.name === qid)) {
         throw new ProtocolError("unknown_question", `wave carries unknown question "${qid}"`);
       }
     }
@@ -190,21 +195,21 @@ function decodeAnswerEnvelope(q: Question, ans: unknown): {
   confidence: number;
 } {
   if (typeof ans !== "object" || ans === null || Array.isArray(ans)) {
-    throw new ProtocolError("protocol", `answer for "${q.id}" must be an object`);
+    throw new ProtocolError("protocol", `answer for "${q.name}" must be an object`);
   }
   const a = ans as { choice?: unknown; probabilities?: unknown; confidence?: unknown; noul?: unknown };
   // A skipped answer is a protocol error, never a silent zero (Python parity).
   if (a.confidence === undefined || a.confidence === null) {
-    throw new ProtocolError("missing_answer", `null answer for question "${q.id}"`);
+    throw new ProtocolError("missing_answer", `null answer for question "${q.name}"`);
   }
-  const confidence = finite(a.confidence, `confidence for "${q.id}"`);
+  const confidence = finite(a.confidence, `confidence for "${q.name}"`);
   const rawProbs = a.probabilities ?? {};
   if (typeof rawProbs !== "object" || rawProbs === null || Array.isArray(rawProbs)) {
-    throw new ProtocolError("protocol", `probabilities for "${q.id}" must be an object`);
+    throw new ProtocolError("protocol", `probabilities for "${q.name}" must be an object`);
   }
   // fromEntries defines own properties, so a "__proto__" key stays data.
   const probs = Object.fromEntries(
-    Object.entries(rawProbs).map(([k, v]) => [k, prob(v, `P(${JSON.stringify(k)}) for "${q.id}"`)]),
+    Object.entries(rawProbs).map(([k, v]) => [k, prob(v, `P(${JSON.stringify(k)}) for "${q.name}"`)]),
   ) as Record<string, number>;
   return { a, probs, confidence };
 }
@@ -222,15 +227,15 @@ function decodeNoulResult(
   } else if (a.choice === "true" || a.choice === "false") {
     choice = a.choice === "true";
   } else {
-    throw new ProtocolError("protocol", `noul answer for "${q.id}" has bad choice ${JSON.stringify(a.choice)}`);
+    throw new ProtocolError("protocol", `noul answer for "${q.name}" has bad choice ${JSON.stringify(a.choice)}`);
   }
   const rawP = Object.hasOwn(probs, "true") ? probs["true"] : a.noul;
   if (rawP === undefined || rawP === null) {
-    throw new ProtocolError("protocol", `noul answer for "${q.id}" has no P(true)`);
+    throw new ProtocolError("protocol", `noul answer for "${q.name}" has no P(true)`);
   }
-  const pTrue = prob(rawP, `P(true) for "${q.id}"`);
+  const pTrue = prob(rawP, `P(true) for "${q.name}"`);
   return new Result({
-    id: q.id,
+    id: q.name,
     kind: "noul",
     waveId,
     value: choice,
@@ -250,15 +255,15 @@ function decodeChoiceResult(
 ): Result {
   const top = typeof a.choice === "string" ? a.choice : argmax(probs);
   if (top === undefined) {
-    throw new ProtocolError("protocol", `choice answer for "${q.id}" has no choice`);
+    throw new ProtocolError("protocol", `choice answer for "${q.name}" has no choice`);
   }
   // Only registered labels are valid answers: an unregistered label would
   // otherwise flow into application logic and UI unchecked.
   if (q.options?.length && !q.options.includes(top)) {
-    throw new ProtocolError("protocol", `choice answer for "${q.id}" is not a registered option: ${JSON.stringify(top)}`);
+    throw new ProtocolError("protocol", `choice answer for "${q.name}" is not a registered option: ${JSON.stringify(top)}`);
   }
   return new Result({
-    id: q.id,
+    id: q.name,
     kind: "choice",
     waveId,
     value: top,
@@ -277,26 +282,45 @@ function decodeResult(q: Question, ans: unknown, waveId: number): Result {
   if (q.kind === "choice") {
     return decodeChoiceResult(q, a, probs, confidence, waveId);
   }
-  // score
+  return decodeScoreResult(q, a, probs, confidence, waveId);
+}
+
+function decodeScoreResult(
+  q: Question,
+  a: { choice?: unknown },
+  probs: Record<string, number>,
+  confidence: number,
+  waveId: number,
+): Score {
   if (!q.levels?.length) {
-    throw new ProtocolError("bad_question", `score question "${q.id}" has no levels`);
+    throw new ProtocolError("bad_question", `score question "${q.name}" has no levels`);
   }
   for (const k of Object.keys(probs)) {
     const idx = /^\d+$/.test(k) ? Number(k) : -1;
     if (idx < 0 || idx >= q.levels.length) {
-      throw new ProtocolError("protocol", `score answer for "${q.id}" has bad level index ${JSON.stringify(k)}`);
+      throw new ProtocolError("protocol", `score answer for "${q.name}" has bad level index ${JSON.stringify(k)}`);
     }
   }
   const missing = q.levels.map((_, i) => i).filter((i) => !Object.hasOwn(probs, String(i)));
   if (missing.length) {
-    throw new ProtocolError("missing_answer", `score answer for "${q.id}" is missing level(s) ${missing.join(", ")}`);
+    throw new ProtocolError("missing_answer", `score answer for "${q.name}" is missing level(s) ${missing.join(", ")}`);
+  }
+  // The server echoes the chosen level DESCRIPTION back as the choice; an
+  // unknown echo is a protocol error, never a silent rename.
+  let echo: string | undefined;
+  if (typeof a.choice === "string") {
+    if (!q.levels.includes(a.choice)) {
+      throw new ProtocolError("protocol", `score answer for "${q.name}" echoes unregistered level ${JSON.stringify(a.choice)}`);
+    }
+    echo = a.choice;
   }
   return new Score({
-    id: q.id,
+    id: q.name,
     waveId,
     probs,
     levels: q.levels,
     confidence,
+    echo,
   });
 }
 

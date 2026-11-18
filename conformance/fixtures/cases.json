@@ -1,5 +1,5 @@
 {
- "note": "Predicate AST: nodes {and|or|not: {of}}, {truthy: {subject}}, {op: eq|ne|gt|gte|lt|lte, subject, value}, {between: {subject, enter, exit}}. Subjects: {type: question, id} = argmax value (noul -> bool, choice -> top option name; score: eq/ne compare the TOP LEVEL NAME, gt/gte/lt/lte compare the EXPECTED ORDINAL); {type: p, question, option?} = P(true) for noul else P(option); {type: top, question}; {type: value, question} = score expected ordinal; {type: p_at_least, question, level}. Expected arrays are per wave in waves.jsonl order (wave_id 0..7). between is stateful: true at >= enter, resets only below exit.",
+ "note": "Predicate AST: nodes {and|or|not: {of}}, {truthy: {subject}}, {op: eq|ne|gt|gte|lt|lte, subject, value}, {between: {subject, enter, exit}}. Subjects: {type: question, id} = argmax value (noul -> bool, choice -> top option name; score: eq/ne compare the TOP LEVEL (the level's description text), gt/gte/lt/lte compare the EXPECTED ORDINAL); {type: p, question, option?} = P(true) for noul else P(option); {type: top, question}; {type: value, question} = score expected ordinal; {type: p_at_least, question, level}. Expected arrays are per wave in waves.jsonl order (wave_id 0..7). between is stateful: true at >= enter, resets only below exit.",
  "predicate_cases": [
   {
    "name": "bare_noul",
@@ -272,7 +272,7 @@
     "subject": {
      "type": "p_at_least",
      "question": "urgency",
-     "level": "medium"
+     "level": "time sensitive today"
     },
     "value": 0.6
    },
@@ -295,7 +295,7 @@
      "type": "top",
      "question": "urgency"
     },
-    "value": "high"
+    "value": "blocking, act now"
    },
    "expected": [
     false,
@@ -316,7 +316,7 @@
      "type": "top",
      "question": "urgency"
     },
-    "value": "medium"
+    "value": "time sensitive today"
    },
    "expected": [
     false,
@@ -393,7 +393,7 @@
      "type": "question",
      "id": "urgency"
     },
-    "value": "high"
+    "value": "blocking, act now"
    },
    "expected": [
     false,

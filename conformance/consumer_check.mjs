@@ -45,7 +45,7 @@ const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
 const readJson = (name) => JSON.parse(readFileSync(join(FIXTURES, name), "utf8"));
 
 const questions = Object.entries(readJson("questions.json").questions).map(([id, q]) =>
-  new Question({ id, kind: q.kind, prompt: q.prompt, options: q.options, levels: q.levels }),
+  new Question({ name: id, kind: q.type, instructions: q.instructions, criteria: q.criteria }),
 );
 const waves = readFileSync(join(FIXTURES, "waves.jsonl"), "utf8")
   .split("\n")
@@ -138,9 +138,18 @@ wss.on("connection", (socket, req) => {
 // -- the consumer's own code, written against the installed package only -------
 
 const app = new Sense({ apiKey: "test-key", baseUrl: `ws://127.0.0.1:${port}` });
-const finished = app.noul("Did the speaker just finish their turn?", { id: "finished" });
-const intent = app.choice("What does the user want?", ["support", "sales", "other"], { id: "intent" });
-app.score("How urgent is the request?", ["low", "medium", "high"], { id: "urgency" });
+const finished = app.noul("finished", {
+  instructions: "Did the person just finish their turn?",
+  criteria: { true: "the person just finished their turn", false: "the person is still mid-turn" },
+});
+const intent = app.choice("intent", {
+  instructions: "What does the person want?",
+  criteria: { support: "Help with a problem", sales: "Wants to buy", other: "Anything else" },
+});
+app.score("urgency", {
+  instructions: "How urgent is the request?",
+  criteria: ["routine, can wait", "time sensitive today", "blocking, act now"],
+});
 
 const raw = [];
 const coalesced = [];

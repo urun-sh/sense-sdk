@@ -23,12 +23,37 @@ from sense import Context, ProtocolError, Sense, SenseUnavailable
 # -- questions ----------------------------------------------------------------
 
 app = Sense()  # apiKey/baseURL default from URUN_API_KEY / SENSE_BASE_URL
-finished = app.noul("Did the current speaker just finish their turn?", id="finished")
-user_speaking = app.noul("Is a human speaking right now?", id="user_speaking")
-intent = app.choice("What does the user want?", ["support", "sales", "other"], id="intent")
-actions = app.choice("What should the agent do?", ["respond", "ignore", "wait"], id="actions")
-urgency = app.score("How urgent is this?", ["low", "medium", "high"], id="urgency")
-tool = app.choice("Which tool applies?", ["none", "weather", "search", "timer"], id="tool")
+finished = app.noul("finished", instructions="Did the current speaker just finish their turn?")
+user_speaking = app.noul("user_speaking", instructions="Is a human speaking right now?")
+intent = app.choice(
+    "intent",
+    instructions="What does the user want?",
+    criteria={"support": "Technical help with the product",
+              "sales": "Pricing, plans, buying",
+              "other": "Anything else"},
+)
+actions = app.choice(
+    "actions",
+    instructions="What should the agent do?",
+    criteria={"respond": "Answer the person now",
+              "ignore": "Stay quiet; nothing is addressed to the agent",
+              "wait": "Let the person finish before deciding"},
+)
+urgency = app.score(
+    "urgency",
+    instructions="How urgent is this?",
+    criteria=["low — routine, can wait",
+              "medium — time sensitive today",
+              "high — blocking and needs action right now"],
+)
+tool = app.choice(
+    "tool",
+    instructions="Which tool applies?",
+    criteria={"none": "No tool is needed",
+              "weather": "A weather question",
+              "search": "Something to look up",
+              "timer": "Set a timer or reminder"},
+)
 
 # The most recent trigger context — barge-in cancels tasks through it.
 last_event: Context | None = None
@@ -84,7 +109,7 @@ async def settled(event):
     print(f"[settled] wave {event.wave.wave_id}: speaker settled")
 
 
-@app.onWave(coalesce=True)  # latest-wins: never process every wave at 25 Hz
+@app.on_wave(coalesce=True)  # latest-wins: never process every wave at 12.5 Hz
 def observe(event):
     w = event.wave
     if w.result("actions").value == "ignore":
@@ -147,7 +172,8 @@ async def main():
     monitor = asyncio.create_task(barge_in_watch())
     start = time.monotonic()
     try:
-        waves = session.run(audio=wav_chunks(path))
+        session.attach(audio=wav_chunks(path))
+        waves = session.run()
         while True:
             try:
                 wave = await asyncio.wait_for(waves.__anext__(), timeout=15.0)

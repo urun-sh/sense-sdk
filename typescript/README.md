@@ -2,7 +2,7 @@
 
 TypeScript SDK for uRun's realtime decision model — Sense.
 
-Sense is a *realtime*, *multi-modal* System One model for voice and video agents and was inspired by the Jev model. It runs on continuously streaming media and answers questions about the input many times per second: for example, whether the user is still speaking or done, whether an interruption is a new question or just an "mmmhmm", and what the user's emotional state is.
+Sense is a *realtime*, *multi-modal* System One model for voice and video agents and was inspired by the Jev model. It runs on continuously streaming media and answers questions about the input many times per second: for example, whether the person is still speaking or done, whether an interruption is a new question or just an "mmmhmm", and what the person's emotional state is.
 
 The Sense SDK gives you one unified surface for perception, decision-making, and reactive agent control.
 
@@ -49,23 +49,26 @@ This is an overview of how `@urun-sh/sense` is used to build the demo above. Sen
 - Choices: categorical questions where the answer must be from a list of choices.
 - Scores: again a set of choices but with the important difference that answers naturally form a continuous scale.
 
-**Declare your decisions.** Create the client app and register your nouls, each registration returns a `Question` with an `id` to reference the results by later:
+**Declare your decisions.** Create the client app and register your questions. The NAME is the first positional argument — it is the answer key you reference results by on every wave. Each question carries `instructions` (what to answer) and `criteria` (Jev-style, exactly one shape per kind):
 
 ```ts
 import { Sense, type Session } from "@urun-sh/sense";
 
 const app = new Sense(); // Needs an API key: default from URUN_API_KEY
 
-const speech = app.noul("Is someone speaking right now?", { id: "speech" });
-const cheese = app.noul("Is the speaker talking about cheese right now?", { id: "cheese" });
+const speech = app.noul("speech", {
+    instructions: "Is someone speaking right now?",
+    criteria: { true: "a person is speaking", false: "nobody is speaking" }, // optional
+});
+const cheese = app.noul("cheese", { instructions: "Is the person talking about cheese right now?" });
 ```
 
-The model can also answer non-binary questions from a list of choices — given a `choice` Sense matches from a fixed option list. Options can carry a short description each (a Jev-style `criteria` map — name → description, insertion order preserved); bare name lists work too:
+The model can also answer non-binary questions from a list of choices — given a `choice` Sense matches from a fixed option list. Criteria is the required name → description map (insertion order is the wire order; every option needs a non-empty description):
 
 ```ts
-const kind = app.choice(
-    "Which type of cheese are they talking about?",
-    {
+const kind = app.choice("cheese_type", {
+    instructions: "Which type of cheese are they talking about?",
+    criteria: {
         cheddar: "Firm yellow cheese",
         brie: "Soft white-rind cheese",
         gouda: "Semi-hard Dutch cheese",
@@ -76,18 +79,16 @@ const kind = app.choice(
         feta: "Crumbly brined cheese",
         other: "Any other kind of cheese",
     },
-    { id: "cheese_type" },
-);
+});
 ```
 
-If you want an ordered scale use a `score` — the grades or levels are the range of answers, in this case the user's feeling will be graded in the range (0..4). Levels may be a name → description map (insertion order is the ordinal order) or a bare name list:
+If you want an ordered scale use a `score` — criteria is the ordered array of level descriptions, low end first (2..10 levels). The level label you read back IS the description text:
 
 ```ts
-const feeling = app.score(
-    "How does the speaker feel about that cheese?",
-    { hate: "Disgusted", dislike: "Negative", meh: "Neutral", like: "Positive", love: "Delighted" },
-    { id: "feeling" },
-);
+const feeling = app.score("feeling", {
+    instructions: "How does the person feel about that cheese?",
+    criteria: ["disgusted", "negative", "neutral", "positive", "delighted"],
+});
 ```
 
 **Open a session and start reading waves:** `session.run()` connects to Sense (unless `connect()` already has), registers the questions,
@@ -152,9 +153,10 @@ const tasks = [sendAudio(chunks, session), readWaves()];
 **Read decisions off each wave.** Every answered question `id` has a `result` with a `.value`, and a confidence/probability `.p`. Additionally:
 - Choices return confidences for each option in `.pOption(name)`(normalized so they form a discrete probability distribution).
 - Scores return:
-  - The argmax grade in `.top`
-  - The probability of that grade in `.p`
-  - The expected index value in `.value`, in this case (0..4) across 5 levels.
+  - The argmax level DESCRIPTION in `.top` (the server echoes the description back as the choice)
+  - The probability of that level in `.p`
+  - The expected index value in `.value`, in this case (0..4) across 5 levels
+  - `pAtLeast(level)`: Σ p over levels at or above a zero-based index or the exact description
 
 You will usually want to gate actions on the probability (the example requires p >= 0.6 to trust any result):
 

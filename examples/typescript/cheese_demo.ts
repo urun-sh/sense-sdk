@@ -23,11 +23,17 @@ import { Sense, type Session, type Wave } from "@urun-sh/sense";
 
 const app = new Sense(); // apiKey / baseUrl default from URUN_API_KEY / SENSE_BASE_URL
 
-app.noul("Is someone speaking right now?", { id: "speech" });
-app.noul("Is the speaker talking about cheese right now?", { id: "cheese" });
-app.choice(
-  "Which type of cheese are they talking about?",
-  {
+app.noul("speech", {
+  instructions: "Is someone speaking right now?",
+  criteria: { true: "a person is speaking", false: "nobody is speaking" },
+});
+app.noul("cheese", {
+  instructions: "Is the person talking about cheese right now?",
+  criteria: { true: "the conversation is about cheese", false: "the conversation is not about cheese" },
+});
+app.choice("cheese_type", {
+  instructions: "Which type of cheese are they talking about?",
+  criteria: {
     cheddar: "Firm yellow cheese",
     brie: "Soft white-rind cheese",
     gouda: "Semi-hard Dutch cheese",
@@ -38,13 +44,11 @@ app.choice(
     feta: "Crumbly brined cheese",
     other: "Any other kind of cheese",
   },
-  { id: "cheese_type" },
-);
-app.score(
-  "How does the speaker feel about that cheese?",
-  { hate: "Disgusted", dislike: "Negative", meh: "Neutral", like: "Positive", love: "Delighted" },
-  { id: "feeling" },
-);
+});
+app.score("feeling", {
+  instructions: "How does the person feel about that cheese?",
+  criteria: ["disgusted", "negative", "neutral", "positive", "delighted"],
+});
 
 /** A wave is a batch of decisions, not an audio response. */
 export type Verdict =
@@ -62,7 +66,7 @@ export function toVerdict(wave: Wave): Verdict {
     speaking,
     talking: true,
     kind: kind.pOption(String(kind.value)) >= 0.6 ? String(kind.value) : "unknown type",
-    feeling: feeling.p >= 0.6 ? feeling.top : "meh",
+    feeling: feeling.p >= 0.6 ? feeling.top : "neutral",
     score: Number(feeling.value),
     p: detection.p,
   };

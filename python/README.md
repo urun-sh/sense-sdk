@@ -45,23 +45,24 @@ This is an overview of how `sense-sdk` is used to build the demo above. Sense is
 - Choices: categorical questions where the answer must be from a list of choices.
 - Scores: again a set of choices but with the important difference that answers naturally form a continuous scale.
 
-**Declare your decisions.** Create the client app and register your nouls, each registration returns a `Question` with an `id` to reference the results by later:
+**Declare your decisions.** Create the client app and register your questions. Each registration returns a `Question`; its NAME is the answer key you read results back by. Questions are exactly Jev's shape: `instructions` (the natural-language question) plus `criteria` per kind, with a description on every option:
 
 ```python
 from sense import Sense
 
 app = Sense()  # Needs an API key: default from URUN_API_KEY
 
-speech = app.noul("Is someone speaking right now?", id="speech")
-cheese = app.noul("Is the speaker talking about cheese right now?", id="cheese")
+speech = app.noul("speech", instructions="Is someone speaking right now?")
+cheese = app.noul("cheese", instructions="Is the speaker talking about cheese right now?")
 ```
 
-The model can also answer non-binary questions from a list of choices — given a `choice` Sense matches from a fixed option list. Options can carry a short description each (a Jev-style `criteria` map — name → description, insertion order preserved); bare name lists work too:
+The model can also answer non-binary questions from a list of choices — given a `choice` Sense matches from a fixed option list. `criteria` is the option map: each option name → a short description that separates it from the others:
 
 ```python
 kind = app.choice(
-    "Which type of cheese are they talking about?",
-    {
+    "cheese_type",
+    instructions="Which type of cheese are they talking about?",
+    criteria={
         "cheddar": "Firm yellow cheese",
         "brie": "Soft white-rind cheese",
         "gouda": "Semi-hard Dutch cheese",
@@ -72,17 +73,16 @@ kind = app.choice(
         "feta": "Crumbly brined cheese",
         "other": "Any other kind of cheese",
     },
-    id="cheese_type",
 )
 ```
 
-If you want an ordered scale use a `score` — the grades or levels are the range of answers, in this case the user's feeling will be graded in the range (0..4). Levels may be a name → description map (insertion order is the ordinal order) or a bare name list:
+If you want an ordered scale use a `score` — `criteria` is an ordered array of level descriptions, low end first (2..10), in this case the user's feeling will be graded in the range (0..4):
 
 ```python
 feeling = app.score(
-    "How does the speaker feel about that cheese?",
-    {"hate": "Disgusted", "dislike": "Negative", "meh": "Neutral", "like": "Positive", "love": "Delighted"},
-    id="feeling",
+    "feeling",
+    instructions="How does the speaker feel about that cheese?",
+    criteria=["Disgusted", "Dislikes it", "Neutral", "Likes it", "Delighted"],
 )
 ```
 
@@ -99,32 +99,24 @@ async def read_waves(waves):
         ...
 ```
 
-**Feed it audio concurrently.** The SDK currently speaks 24 kHz PCM16 mono in 40 ms chunks. The audio push and the wave consumption must run at the same time — a blocking wave loop starves the audio — so we run them as concurrent tasks:
+**Stream inputs with `session.attach(...)`.** The SDK currently speaks 24 kHz PCM16 mono in 40 ms chunks. `attach` is the one canonical way to stream inputs: it pumps your sources (async iterables, sync iterables, or zero-arg callables — `None` ends) while the wave loop consumes decisions:
 
 ```python
-async def send_audio(mic, session):
-    async for chunk in mic.chunks():
-        session.audio.push(chunk)  # PCM16, mono, 24 kHz; one 40 ms block
-    await session.close()  # audio ended — end the run loop so read_waves returns
-
-
-tasks = [
-    asyncio.create_task(send_audio(mic, session)),
-    asyncio.create_task(read_waves(waves)),
-]
-await asyncio.gather(*tasks)
+session.attach(audio=mic.chunks())  # PCM16, mono, 24 kHz; one 40 ms block
+await asyncio.gather(read_waves(waves))
 ```
 
-`session.run()` can also take audio/video/text iterators directly and pump them for you; this example pushes audio manually to keep the mic and the level meter in step.
+Audio pushes and wave consumption must both make progress — a blocking wave loop starves the audio. `attach` starts the pumps for you (before or during `run()`); `detach()` on the returned handle stops them, and the session closing stops them too.
 
-**Where does a live mic come from (Python)?** There is no capture built into the core SDK — keep it dependency-free. The server-side path is exactly the loop above: produce PCM16 mono 24 kHz chunks yourself (read a WAV, or use whatever capture library your app already has — e.g. a `sounddevice` raw stream at 24 kHz) and `session.audio.push(chunk)` each one. For a browser mic with zero plumbing, use the TypeScript SDK's one-liner: `session.attach(await navigator.mediaDevices.getUserMedia({ audio: true }))`.
+**Where does a live mic come from (Python)?** There is no capture built into the core SDK — keep it dependency-free. Produce PCM16 mono 24 kHz chunks yourself (read a WAV, or use whatever capture library your app already has — e.g. a `sounddevice` raw stream at 24 kHz) and pass the iterator to `session.attach(audio=...)`. For a browser mic with zero plumbing, use the TypeScript SDK's one-liner: `session.attach(await navigator.mediaDevices.getUserMedia({ audio: true }))`.
 
-**Read decisions off each wave.** Every answered question `id` has a `result` with a `.value`, and a confidence/probability `.p`. Additionally:
+**Read decisions off each wave.** Every answered question `name` has a `result` with a `.value`, and a confidence/probability `.p`. Additionally:
 - Choices return confidences for each option in `.p_option(name)`(normalized so they form a discrete probability distribution).
 - Scores return:
-  - The argmax grade in `.top` 
-  - The probability of that grade in `.p`
+  - The argmax level in `.top` (the level's description, as the model echoes it)
+  - The probability of that level in `.p`
   - The expected index value in `.value`, in this case (0..4) across 5 levels.
+  - Cumulative tail probabilities in `.p_at_least(level)` — a zero-based index or the exact level description.
 
 You will usually want to gate actions on the probability (the example requires p >= 0.6 to trust any result):
 
@@ -152,7 +144,7 @@ finally:
 ```
 
 ## Next steps
-Beyond this example, the SDK also has `app.predicate(fn)` + `app.when(pred, handler)` for edge-triggered handlers, and `app.onWave(handler)` to observe every completed wave. Refer to the [Sense reference](https://docs.urun.sh/docs/sense/reference?facet=session) for details.
+Beyond this example, the SDK also has `app.predicate(fn)` + `app.when(pred, handler)` for edge-triggered handlers, and `app.on_wave(handler)` to observe every completed wave. Refer to the [Sense reference](https://docs.urun.sh/docs/sense/reference?facet=session) for details.
 
 ### Full example code
 

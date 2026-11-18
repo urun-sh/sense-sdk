@@ -29,18 +29,19 @@ from sense import Sense, SenseUnavailable
 
 SAMPLE_RATE = 24000   # the SDK speaks 24 kHz PCM16 mono
 CHUNK_MS = 40         # like a live mic cadence
-FEELING_EMOJI = {"hate": "🧀🤮", "dislike": "🧀🙁", "meh": "🧀😐", "like": "🧀🙂", "love": "🧀❤️"}
+FEELING_EMOJI = {"Disgusted": "🧀🤮", "Dislikes it": "🧀🙁", "Neutral": "🧀😐", "Likes it": "🧀🙂", "Delighted": "🧀❤️"}
 BLOCKSIZE = SAMPLE_RATE * CHUNK_MS // 1000  # 960 samples per callback
 USE_PIPEWIRE = sys.platform.startswith("linux")
 
 # -- Sense: define the questions, stream audio, read decisions ----------------
 app = Sense()  # api key / base URL default from URUN_API_KEY / SENSE_BASE_URL
 
-speech = app.noul("Is someone speaking right now?", id="speech")
-cheese = app.noul("Is the speaker talking about cheese right now?", id="cheese")
+speech = app.noul("speech", instructions="Is someone speaking right now?")
+cheese = app.noul("cheese", instructions="Is the speaker talking about cheese right now?")
 kind = app.choice(
-    "Which type of cheese are they talking about?",
-    {
+    "cheese_type",
+    instructions="Which type of cheese are they talking about?",
+    criteria={
         "cheddar": "Firm yellow cheese",
         "brie": "Soft white-rind cheese",
         "gouda": "Semi-hard Dutch cheese",
@@ -51,12 +52,11 @@ kind = app.choice(
         "feta": "Crumbly brined cheese",
         "other": "Any other kind of cheese",
     },
-    id="cheese_type",
 )
 feeling = app.score(
-    "How does the speaker feel about that cheese?",
-    {"hate": "Disgusted", "dislike": "Negative", "meh": "Neutral", "like": "Positive", "love": "Delighted"},
-    id="feeling",
+    "feeling",
+    instructions="How does the speaker feel about that cheese?",
+    criteria=["Disgusted", "Dislikes it", "Neutral", "Likes it", "Delighted"],
 )
 
 
@@ -75,7 +75,7 @@ def show_wave(wave, session, display):
         sentiment = wave.result("feeling")
         display.verdict.update(
             kind=cheese_type.value if cheese_type.p_option(cheese_type.value) >= 0.6 else "unknown type",
-            feeling=sentiment.top if sentiment.p >= 0.6 else "meh",
+            feeling=sentiment.top if sentiment.p >= 0.6 else "Neutral",
             score=sentiment.value,
             p=detection.p,
         )
@@ -83,10 +83,13 @@ def show_wave(wave, session, display):
 
 
 async def send_audio(mic, session, to_sense):
-    """Drain the mic; in mic-only mode the chunks only feed the level meter."""
-    async for chunk in mic.chunks():
-        if to_sense:
-            session.audio.push(chunk)  # PCM16, mono, 24 kHz; one 40 ms block
+    """Stream the mic into the session; in mic-only mode the chunks only feed
+    the level meter (the level updates inside ``mic.chunks()``)."""
+    if to_sense:
+        session.attach(audio=mic.chunks())  # PCM16, mono, 24 kHz; one 40 ms block
+        return
+    async for _chunk in mic.chunks():
+        pass
 
 
 async def receive_decisions(waves, session, display):
@@ -311,9 +314,15 @@ class Display:
             body = f"{GREY}listening…{RESET}"
         elif self.verdict["talking"]:
             k, f = self.verdict["kind"], self.verdict["feeling"]
-            col = GREEN if f in ("love", "like") else RED if f in ("hate", "dislike") else YELLOW
+            # The score's levels are description labels now (Jev's criteria).
+            col = GREEN if f in ("Likes it", "Delighted") else RED if f in ("Disgusted", "Dislikes it") else YELLOW
             emoji = FEELING_EMOJI.get(f, "🧀😐")
-            sentiment = f"you {f} it" if f in ("love", "like", "hate", "dislike") else "neutral sentiment"
+            sentiment = {
+                "Disgusted": "you hate it",
+                "Dislikes it": "you dislike it",
+                "Likes it": "you like it",
+                "Delighted": "you love it",
+            }.get(f, "neutral sentiment")
             body = Text.assemble(
                 Text.from_ansi(f"{BOLD}{MAGENTA}🧀 CHEESE{RESET} {DIM}·{RESET} "),
                 field(f"{BOLD}{CYAN}{k}{RESET}", 12),

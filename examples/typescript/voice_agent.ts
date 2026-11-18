@@ -17,12 +17,30 @@ import { Score, Sense, type Context, type Wave } from "@urun-sh/sense";
 // -- questions ----------------------------------------------------------------
 
 const app = new Sense({}); // apiKey/baseUrl default from URUN_API_KEY / SENSE_BASE_URL
-const finished = app.noul("Did the current speaker just finish their turn?", { id: "finished" });
-const userSpeaking = app.noul("Is a human speaking right now?", { id: "user_speaking" });
-const intent = app.choice("What does the user want?", ["support", "sales", "other"], { id: "intent" });
-const actions = app.choice("What should the agent do?", ["respond", "ignore", "wait"], { id: "actions" });
-app.score("How urgent is the request?", ["low", "medium", "high"], { id: "urgency" });
-const tool = app.choice("Should a tool run?", ["none", "weather", "search", "timer"], { id: "tool" });
+const finished = app.noul("finished", {
+  instructions: "Did the current speaker just finish their turn?",
+  criteria: { true: "the person just finished their turn", false: "the person is still mid-turn" },
+});
+const userSpeaking = app.noul("user_speaking", {
+  instructions: "Is a person speaking right now?",
+  criteria: { true: "a person is speaking", false: "nobody is speaking" },
+});
+const intent = app.choice("intent", {
+  instructions: "What does the person want?",
+  criteria: { support: "Help with a problem", sales: "Wants to buy", other: "Anything else" },
+});
+const actions = app.choice("actions", {
+  instructions: "What should the agent do?",
+  criteria: { respond: "Answer now", ignore: "Stay silent", wait: "Hold for more context" },
+});
+app.score("urgency", {
+  instructions: "How urgent is the request?",
+  criteria: ["low — routine", "medium — time sensitive today", "high — blocking right now"],
+});
+const tool = app.choice("tool", {
+  instructions: "Should a tool run?",
+  criteria: { none: "No tool needed", weather: "Weather lookup", search: "Web search", timer: "Set a timer" },
+});
 
 // The most recent trigger context — barge-in cancels tasks through it.
 let lastEvent: Context | null = null;

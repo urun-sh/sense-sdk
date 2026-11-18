@@ -9,7 +9,7 @@ export type Subject =
   | { type: "p"; question: string; option?: string }
   | { type: "top"; question: string }
   | { type: "value"; question: string }
-  | { type: "p_at_least"; question: string; level: string };
+  | { type: "p_at_least"; question: string; level: number | string };
 
 export type Op = "eq" | "ne" | "gt" | "gte" | "lt" | "lte";
 type Prim = string | number | boolean;

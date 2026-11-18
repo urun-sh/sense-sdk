@@ -7,9 +7,9 @@ import { errMessage } from "../src/errors.ts";
 import { MAX_LINE_BYTES, NdjsonSplitter, DialRefused, checkBaseUrl, defaultDialers, parseCallsAnswer } from "../src/transport.ts";
 
 const QUESTIONS = [
-  new Question({ id: "finished", kind: "noul" }),
-  new Question({ id: "intent", kind: "choice", options: ["support", "other"] }),
-  new Question({ id: "urgency", kind: "score", levels: ["low", "high"] }),
+  new Question({ name: "finished", kind: "noul" }),
+  new Question({ name: "intent", kind: "choice", instructions: "What does the person want?", criteria: { support: "Help with a problem", other: "Anything else" } }),
+  new Question({ name: "urgency", kind: "score", instructions: "How urgent?", criteria: ["low", "high"] }),
 ];
 
 const GOOD: Record<string, Record<string, unknown>> = {

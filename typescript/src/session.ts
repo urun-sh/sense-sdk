@@ -2,7 +2,6 @@
 import { checkBaseUrl, connectWire, DialRefused } from "./transport.ts";
 import type { Transport, Wire, WireDialer } from "./transport.ts";
 import { Question, instructionsEnvelope } from "./question.ts";
-import type { QuestionInit, QuestionKind } from "./question.ts";
 import { Wave, type Result } from "./wave.ts";
 import { Context, type WaveHandler } from "./context.ts";
 import type { Predicate } from "./predicate.ts";
@@ -88,6 +87,17 @@ export interface SessionOptions {
   wireFactory?: WireDialer;
 }
 
+/** hz must be a finite number in (0, 12.5]: 12.5 Hz is one seat's sustained
+ * floor on the serving GPU — a faster request coalesces to the newest media
+ * and just realizes fewer waves, so it is refused up front. */
+function checkHz(hz: number, given: number | undefined): void {
+  if (!Number.isFinite(hz) || hz <= 0 || hz > Session.DEFAULT_HZ) {
+    throw new RangeError(
+      `hz must be a finite number in (0, ${Session.DEFAULT_HZ}] — 12.5 Hz is one seat's sustained floor on the serving GPU (got ${String(given)})`,
+    );
+  }
+}
+
 function wireDefaults(opts: SessionOptions): { transport: Transport; wireFactory: WireDialer } {
   return { transport: opts.transport ?? "auto", wireFactory: opts.wireFactory ?? connectWire };
 }
@@ -164,6 +174,7 @@ export class Session {
     this.baseUrl = checkBaseUrl(opts.baseUrl ?? envVar("SENSE_BASE_URL") ?? Session.DEFAULT_BASE_URL, opts.allowInsecure);
     this.model = opts.model ?? Session.DEFAULT_MODEL;
     this.hz = opts.hz ?? Session.DEFAULT_HZ;
+    checkHz(this.hz, opts.hz);
     ({ transport: this.transport, wireFactory: this.wireFactory } = wireDefaults(opts));
     this.audio = new AudioInput(this);
     this.video = new VideoInput(this);
@@ -177,11 +188,6 @@ export class Session {
 
   get closed(): boolean {
     return this.isClosed;
-  }
-
-  /** Register (or replace) a question; takes effect at the next turn open. */
-  addQuestion(id: string, kind: QuestionKind, opts: Omit<QuestionInit, "id" | "kind"> = {}): Question {
-    return this.addQuestionRaw(new Question({ id, kind, ...opts }));
   }
 
   /** Replace the whole question registry (adds, edits AND removals) and push
@@ -200,7 +206,7 @@ export class Session {
   }
 
   private addQuestionRaw(q: Question): Question {
-    const i = this.registry.findIndex((x) => x.id === q.id);
+    const i = this.registry.findIndex((x) => x.name === q.name);
     if (i >= 0) this.registry[i] = q;
     else this.registry.push(q);
     return q;
