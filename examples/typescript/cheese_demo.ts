@@ -23,11 +23,17 @@ import { Sense, type Session, type Wave } from "@urun-sh/sense";
 
 const app = new Sense(); // apiKey / baseUrl default from URUN_API_KEY / SENSE_BASE_URL
 
-app.noul("Is someone speaking right now?", { id: "speech" });
-app.noul("Is the speaker talking about cheese right now?", { id: "cheese" });
-app.choice(
-  "Which type of cheese are they talking about?",
-  {
+app.noul("speech", {
+  instructions: "Is someone speaking right now?",
+  criteria: { true: "a person is speaking", false: "nobody is speaking" },
+});
+app.noul("cheese", {
+  instructions: "Is the person talking about cheese right now?",
+  criteria: { true: "the conversation is about cheese", false: "the conversation is not about cheese" },
+});
+app.choice("cheese_type", {
+  instructions: "Which type of cheese are they talking about?",
+  criteria: {
     cheddar: "Firm yellow cheese",
     brie: "Soft white-rind cheese",
     gouda: "Semi-hard Dutch cheese",
@@ -38,13 +44,11 @@ app.choice(
     feta: "Crumbly brined cheese",
     other: "Any other kind of cheese",
   },
-  { id: "cheese_type" },
-);
-app.score(
-  "How does the speaker feel about that cheese?",
-  { hate: "Disgusted", dislike: "Negative", meh: "Neutral", like: "Positive", love: "Delighted" },
-  { id: "feeling" },
-);
+});
+app.score("feeling", {
+  instructions: "How does the person feel about that cheese?",
+  criteria: ["disgusted", "negative", "neutral", "positive", "delighted"],
+});
 
 /** A wave is a batch of decisions, not an audio response. */
 export type Verdict =
@@ -62,7 +66,7 @@ export function toVerdict(wave: Wave): Verdict {
     speaking,
     talking: true,
     kind: kind.pOption(String(kind.value)) >= 0.6 ? String(kind.value) : "unknown type",
-    feeling: feeling.p >= 0.6 ? feeling.top : "meh",
+    feeling: feeling.p >= 0.6 ? feeling.top : "neutral",
     score: Number(feeling.value),
     p: detection.p,
   };
@@ -144,46 +148,60 @@ export function closeRelay(relay: Relay): boolean {
 }
 
 export function handleAudio(relay: Relay, frame: Uint8Array | ArrayBuffer): void {
-  if (relay.closed) return;
-  if (relay.session && !relay.streaming) {
-    let total = frame.byteLength;
-    for (const f of relay.pending) total += f.byteLength;
-    if (total > MAX_PENDING_BYTES) {
-      // A stuck dial would grow this buffer unboundedly; give up instead.
-      relay.pending.length = 0;
-      relay.send({ type: "error", message: "upstream connection too slow — audio buffer overflow" });
-      relay.end();
-      return;
-    }
-    const first = relay.pending.length === 0;
-    relay.pending.push(frame);
-    if (first) relay.wake?.();
+  if (relay.closed || !relay.session) return;
+  let total = frame.byteLength;
+  for (const f of relay.pending) total += f.byteLength;
+  if (total > MAX_PENDING_BYTES) {
+    // A stuck upstream would grow this buffer unboundedly; give up instead.
+    relay.pending.length = 0;
+    relay.send({ type: "error", message: "upstream connection too slow — audio buffer overflow" });
+    relay.end();
     return;
   }
-  if (relay.session) relay.session.audio.push(frame); // PCM16, mono, 24 kHz; one 40 ms block
+  relay.pending.push(frame); // PCM16, mono, 24 kHz; one 40 ms block
+  relay.wake?.();
+}
+
+/** The relay's browser frames as ONE attach source: buffered frames first,
+ * then each new frame as it lands; ends when the relay closes. */
+async function* relayAudio(relay: Relay): AsyncGenerator<Uint8Array | ArrayBuffer> {
+  try {
+    for (;;) {
+      for (const frame of relay.pending.splice(0)) yield frame;
+      if (relay.closed) return;
+      await new Promise<void>((resolve) => (relay.wake = resolve));
+    }
+  } finally {
+    relay.wake?.(); // release a parked frame-wait so nothing hangs on a dead relay
+  }
 }
 
 export async function pump(relay: Relay): Promise<void> {
   const session = relay.session;
   if (!session) return;
   try {
-    await session.connect();
+    // run() dials on first read; audio pushed before the dial is buffered
+    // client-side and replayed onto the fresh wire before any turn opens.
     if (relay.closed) {
-      // The client left during the dial; shut the session down instead of lingering.
-      session.close();
+      // The client left before the loop started; shut the session down instead of lingering.
+      await session.close();
       return;
     }
     // The turn opens on the first pushed audio frame, so wait for mic audio
     // before starting the loop.
     if (relay.pending.length === 0) await new Promise<void>((resolve) => (relay.wake = resolve));
     if (relay.closed) {
-      session.close();
+      await session.close();
       return;
     }
     relay.streaming = true;
-    for (const frame of relay.pending.splice(0)) session.audio.push(frame);
-    for await (const wave of session.run()) {
-      relay.send({ type: "wave", verdict: toVerdict(wave) });
+    const attached = await session.attach({ audio: relayAudio(relay) });
+    try {
+      for await (const wave of session.run()) {
+        relay.send({ type: "wave", verdict: toVerdict(wave) });
+      }
+    } finally {
+      attached.detach();
     }
     if (relay.done) return; // cap path already reported stats and ended
     relay.send({ type: "stats", stats: session.stats });

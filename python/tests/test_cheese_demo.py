@@ -86,7 +86,7 @@ def wave(**overrides):
         "cheese_p": 0.9,
         "kind": "brie",
         "kind_p": 0.9,
-        "feeling": "love",
+        "feeling": "Delighted",
         "feeling_p": 0.9,
         "feeling_score": 3.9,
     }
@@ -109,7 +109,7 @@ def test_show_wave_reports_talking_with_kind_and_feeling(demo):
     demo.show_wave(wave(), FakeSession(), display)
     assert display.sense_state == "online"
     assert display.speaking is True
-    assert display.verdict == {"talking": True, "kind": "brie", "feeling": "love", "score": 3.9, "p": 0.9}
+    assert display.verdict == {"talking": True, "kind": "brie", "feeling": "Delighted", "score": 3.9, "p": 0.9}
     assert display.wave_id == 7
     assert display.wire is FakeSession._wire
     assert display.rendered == 1
@@ -128,7 +128,7 @@ def test_show_wave_nulls_unconfident_kind_and_feeling(demo):
     display = FakeDisplay()
     demo.show_wave(wave(kind_p=0.3, feeling_p=0.3), FakeSession(), display)
     assert display.verdict["kind"] == "unknown type"
-    assert display.verdict["feeling"] == "meh"
+    assert display.verdict["feeling"] == "Neutral"
 
 
 def test_show_wave_null_verdict_when_not_speaking(demo):
@@ -350,7 +350,7 @@ def test_render_shows_listening_before_a_verdict(demo):
 
 
 def test_render_shows_cheese_verdict(demo):
-    verdict = {"talking": True, "kind": "brie", "feeling": "love", "score": 3.9, "p": 0.9}
+    verdict = {"talking": True, "kind": "brie", "feeling": "Delighted", "score": 3.9, "p": 0.9}
     text = rendered_text(display_with(demo, level=0.5, blocks=3, verdict=verdict, speaking=True))
     assert "CHEESE" in text
     assert "brie" in text
@@ -360,7 +360,7 @@ def test_render_shows_cheese_verdict(demo):
 
 
 def test_render_shows_score_levels(demo):
-    for feeling, score, emoji in [("love", 3.9, "❤️"), ("like", 3.1, "🙂"), ("dislike", 1.2, "🙁"), ("hate", 0.4, "🤮")]:
+    for feeling, score, emoji in [("Delighted", 3.9, "❤️"), ("Likes it", 3.1, "🙂"), ("Dislikes it", 1.2, "🙁"), ("Disgusted", 0.4, "🤮")]:
         verdict = {"talking": True, "kind": "brie", "feeling": feeling, "score": score, "p": 0.9}
         text = rendered_text(display_with(demo, level=0.5, blocks=3, verdict=verdict, speaking=True))
         assert emoji in text, f"expected {emoji} for {feeling}"
@@ -376,8 +376,8 @@ def test_render_shows_not_cheese(demo):
 def test_status_fields_stay_in_place_and_never_wrap(demo):
     positions = []
     for i, (kind, feeling) in enumerate([
-        ("brie", "love"), ("parmesan", "hate"), ("unknown type", "meh"),
-        ("mozzarella", "dislike"), ("feta", "like"),
+        ("brie", "Delighted"), ("parmesan", "Disgusted"), ("unknown type", "Neutral"),
+        ("mozzarella", "Dislikes it"), ("feta", "Likes it"),
     ]):
         d = display_with(
             demo, level=0 if i == 0 else 0.5, blocks=10 ** i,
@@ -386,7 +386,12 @@ def test_status_fields_stay_in_place_and_never_wrap(demo):
             verdict={"talking": True, "kind": kind, "feeling": feeling, "score": 2.3, "p": 0.9},
         )
         text = rendered_text(d)
-        sentiment = "neutral sentiment" if feeling == "meh" else f"you {feeling} it"
+        sentiment = {
+            "Disgusted": "you hate it",
+            "Dislikes it": "you dislike it",
+            "Likes it": "you like it",
+            "Delighted": "you love it",
+        }.get(feeling, "neutral sentiment")
         positions.append(tuple(cell_len(text[:text.index(label)]) for label in
                                ("🧀 CHEESE", kind, "(0.90)", sentiment, "(2.3)")))
         for width in (80, 160):

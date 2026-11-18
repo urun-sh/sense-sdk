@@ -29,10 +29,10 @@
   #speech { font-size: 14px; color: var(--dim); }
   main { flex: 1; display: flex; align-items: center; justify-content: center; text-align: center; }
   #verdict { font-size: 20px; color: var(--dim); max-width: 28em; }
-  #verdict.love, #verdict.like { color: var(--green); }
-  #verdict.hate, #verdict.dislike { color: var(--red); }
-  #verdict.meh { color: var(--yellow); }
-  #verdict.love .big, #verdict.like .big, #verdict.hate .big, #verdict.dislike .big, #verdict.meh .big { color: var(--magenta); }
+  #verdict.delighted, #verdict.positive { color: var(--green); }
+  #verdict.disgusted, #verdict.negative { color: var(--red); }
+  #verdict.neutral { color: var(--yellow); }
+  #verdict.delighted .big, #verdict.positive .big, #verdict.disgusted .big, #verdict.negative .big, #verdict.neutral .big { color: var(--magenta); }
   #verdict .kind { color: var(--cyan); font-weight: 700; }
   #verdict .big { font-size: 30px; font-weight: 700; }
   #verdict .detail { margin-top: 8px; font-size: 20px; }
@@ -131,13 +131,13 @@ function setSpeaking(v) {
 
 // -- verdict card -------------------------------------------------------------
 
-// One emoji per feeling level so the verdict card can distinguish like from love.
+// One emoji per feeling level so the verdict card can distinguish positive from delighted.
 const FEELING_EMOJI = {
-  hate: "🧀🤮",
-  dislike: "🧀🙁",
-  meh: "🧀😐",
-  like: "🧀🙂",
-  love: "🧀❤️",
+  disgusted: "🧀🤮",
+  negative: "🧀🙁",
+  neutral: "🧀😐",
+  positive: "🧀🙂",
+  delighted: "🧀❤️",
 };
 
 function renderVerdict(v) {
@@ -147,7 +147,7 @@ function renderVerdict(v) {
     return;
   }
   const emoji = FEELING_EMOJI[v.feeling] ?? "🧀😐";
-  const sentiment = v.feeling === "meh" ? "neutral sentiment" : `you ${v.feeling} it`;
+  const sentiment = v.feeling === "neutral" ? "neutral sentiment" : `you ${v.feeling} it`;
   verdictEl.className = v.feeling;
   // Build nodes with textContent: verdict fields come from the service and
   // must never be parsed as HTML on a page that holds mic permission.

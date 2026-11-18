@@ -16,6 +16,7 @@ import {
   ProtocolError,
   Question,
   Score,
+  instructionsEnvelope,
   Session,
   Wave,
   sessionEvent,
@@ -28,11 +29,9 @@ const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
 // -- fixture shapes (the fixtures are the validated boundary) ---------------
 
 interface QuestionJson {
-  id: string;
-  kind: string;
-  prompt?: string;
-  options?: string[];
-  levels?: string[];
+  type: string;
+  instructions?: string;
+  criteria?: Record<string, string> | string[];
 }
 interface SubjectJson {
   type: string;
@@ -98,13 +97,12 @@ const readFixtureLines = (name: string): string[] =>
 
 // -- builders ----------------------------------------------------------------
 
-function qFromJson(d: QuestionJson): Question {
+function qFromJson(d: QuestionJson & { id: string }): Question {
   return new Question({
-    id: d.id,
-    kind: d.kind as "noul" | "choice" | "score",
-    prompt: d.prompt,
-    options: d.options,
-    levels: d.levels,
+    name: d.id,
+    kind: d.type as "noul" | "choice" | "score",
+    instructions: d.instructions,
+    criteria: d.criteria,
   });
 }
 
@@ -135,7 +133,7 @@ function astFromJson(d: AstJson): Predicate {
 }
 
 function loadQuestions(): Question[] {
-  // Fixture values carry no id — the map key IS the id.
+  // Fixture values carry no name — the map key IS the name.
   return Object.entries(parseJson("questions.json", isQuestionsJson).questions).map(([id, d]) =>
     qFromJson({ ...d, id }),
   );
@@ -180,10 +178,10 @@ describe("wave decoding", () => {
       expect(f.confidence).toBeGreaterThanOrEqual(0);
       const i = w.result("intent");
       expect(["support", "sales", "other"]).toContain(i.value as string);
-      const u = w.result("urgency");
-      expect(u).toBeInstanceOf(Score);
-      expect(["low", "medium", "high"]).toContain(u.top);
-      expect(u.pAtLeast("low")).toBeCloseTo(1.0);
+      const u = w.result("urgency") as Score;
+      expect(["routine, can wait", "time sensitive today", "blocking, act now"]).toContain(u.top);
+      expect(u.pAtLeast(0)).toBeCloseTo(1.0);
+      expect(u.pAtLeast("routine, can wait")).toBeCloseTo(1.0);
     }
   });
 
@@ -294,16 +292,23 @@ describe("session", () => {
     expect(s.baseUrl).toBe(Session.DEFAULT_BASE_URL);
   });
 
-  test("question registration shape", () => {
+  test("question registration shape (0.2.0: name-first, no addQuestion)", () => {
     const s = new Session({ apiKey: "sk-test" });
-    const q = s.addQuestion("finished", "noul", { prompt: "did they finish?" });
-    expect(q.id).toBe("finished");
+    const q = new Question({ name: "finished", kind: "noul", instructions: "did they finish?" });
+    s.setQuestions([q]);
+    expect(q.name).toBe("finished");
     expect(s.questions).toEqual([q]);
   });
 
-  test("streaming wire shape", () => {
-    const q = { id: "finished", kind: "noul", prompt: "did they finish?" };
-    expect(Object.keys(q).sort()).toEqual(["id", "kind", "prompt"]);
+  test("instructions envelope wire shape (Jev keys only)", () => {
+    const questions = loadQuestions();
+    const env = instructionsEnvelope(questions, 12.5);
+    for (const entry of Object.values(env.questions)) {
+      expect(Object.keys(entry).every((k) => ["type", "instructions", "criteria"].includes(k))).toBe(true);
+    }
+    expect(Object.keys(env.questions).sort()).toEqual(["actions", "finished", "intent", "urgency", "user_speaking"]);
+    expect(env.questions["finished"]).toEqual({ type: "noul", instructions: "Did the current speaker just finish their turn?" });
+    expect(env.hz).toBe(12.5);
     const frame = { type: "input.audio", audio: "UklGRg==", sample_rate: 16000, source: "mic" };
     expect(Object.keys(frame).sort()).toEqual(["audio", "sample_rate", "source", "type"]);
   });

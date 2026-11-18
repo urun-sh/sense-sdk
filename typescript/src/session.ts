@@ -1,13 +1,12 @@
 /** Session: inputs, the §1–§7 wire loop over `wire`, and wave assembly. */
+import { toB64 } from "./bytes.ts";
+import { attachStream, type AttachHandle, type AttachOptions, type AttachStream } from "./attach.ts";
 import { checkBaseUrl, connectWire, DialRefused } from "./transport.ts";
 import type { Transport, Wire, WireDialer } from "./transport.ts";
 import { Question, instructionsEnvelope } from "./question.ts";
-import type { QuestionInit, QuestionKind } from "./question.ts";
-import { Wave, type Result } from "./wave.ts";
-import { Context, type WaveHandler } from "./context.ts";
-import type { Predicate } from "./predicate.ts";
+import { Wave } from "./wave.ts";
+import { Context } from "./context.ts";
 import { OutOfCreditsError, ProtocolError, errMessage } from "./errors.ts";
-import { attachStream, type AttachHandle, type AttachOptions, type AttachStream } from "./attach.ts";
 
 const MAX_FRAME_BYTES = 256_000;
 const TURN_TOKEN_BUDGET = 250_000;
@@ -88,6 +87,17 @@ export interface SessionOptions {
   wireFactory?: WireDialer;
 }
 
+/** hz must be a finite number in (0, 12.5]: 12.5 Hz is one seat's sustained
+ * floor on the serving GPU — a faster request coalesces to the newest media
+ * and just realizes fewer waves, so it is refused up front. */
+function checkHz(hz: number, given: number | undefined): void {
+  if (!Number.isFinite(hz) || hz <= 0 || hz > Session.DEFAULT_HZ) {
+    throw new RangeError(
+      `hz must be a finite number in (0, ${Session.DEFAULT_HZ}] — 12.5 Hz is one seat's sustained floor on the serving GPU (got ${String(given)})`,
+    );
+  }
+}
+
 function wireDefaults(opts: SessionOptions): { transport: Transport; wireFactory: WireDialer } {
   return { transport: opts.transport ?? "auto", wireFactory: opts.wireFactory ?? connectWire };
 }
@@ -106,9 +116,6 @@ export class Session {
   readonly hz: number;
   readonly transport: Transport;
   readonly context = new Context(this);
-  readonly audio: AudioInput;
-  readonly video: VideoInput;
-  readonly text: TextInput;
   readonly stats = { waves: 0, turns: 0, errors: 0, reconnects: 0, decisions: 0, protocolErrors: 0 };
 
   private isClosed = false;
@@ -164,10 +171,8 @@ export class Session {
     this.baseUrl = checkBaseUrl(opts.baseUrl ?? envVar("SENSE_BASE_URL") ?? Session.DEFAULT_BASE_URL, opts.allowInsecure);
     this.model = opts.model ?? Session.DEFAULT_MODEL;
     this.hz = opts.hz ?? Session.DEFAULT_HZ;
+    checkHz(this.hz, opts.hz);
     ({ transport: this.transport, wireFactory: this.wireFactory } = wireDefaults(opts));
-    this.audio = new AudioInput(this);
-    this.video = new VideoInput(this);
-    this.text = new TextInput(this);
     for (const q of opts.questions ?? []) this.addQuestionRaw(q);
   }
 
@@ -177,11 +182,6 @@ export class Session {
 
   get closed(): boolean {
     return this.isClosed;
-  }
-
-  /** Register (or replace) a question; takes effect at the next turn open. */
-  addQuestion(id: string, kind: QuestionKind, opts: Omit<QuestionInit, "id" | "kind"> = {}): Question {
-    return this.addQuestionRaw(new Question({ id, kind, ...opts }));
   }
 
   /** Replace the whole question registry (adds, edits AND removals) and push
@@ -200,7 +200,7 @@ export class Session {
   }
 
   private addQuestionRaw(q: Question): Question {
-    const i = this.registry.findIndex((x) => x.id === q.id);
+    const i = this.registry.findIndex((x) => x.name === q.name);
     if (i >= 0) this.registry[i] = q;
     else this.registry.push(q);
     return q;
@@ -291,8 +291,8 @@ export class Session {
     if (b64 !== undefined) this.sendJson({ type: "input_audio_buffer.append", audio: b64, source });
   }
 
-  /** @internal */
-  emitVideo(jpeg: Uint8Array): void {
+  /** @internal One JPEG frame (Uint8Array or ArrayBuffer). */
+  emitVideo(jpeg: Uint8Array | ArrayBuffer): void {
     this.touch();
     if (jpeg.byteLength > MAX_FRAME_BYTES) {
       throw new ProtocolError("frame_too_large", `frame ${jpeg.byteLength}B > ${MAX_FRAME_BYTES}B`);
@@ -308,8 +308,9 @@ export class Session {
     });
   }
 
-  /** @internal */
-  emitText(text: string, mode: string): void {
+  /** @internal Text context for the model: append/replace the transcript, or
+   * a one-shot event text. */
+  emitText(text: string, mode: TextMode): void {
     this.touch();
     this.inputSinceTurn++;
     if (mode === "event") {
@@ -367,14 +368,16 @@ export class Session {
     this.stats.turns++;
   }
 
-  /** Barge-in: stop the active turn's cadence. */
+  /** Barge-in: stop the active turn's cadence. @internal — Context.cancel
+   * and setQuestions barge in; apps call ctx.cancel(key). */
   bargeIn(): void {
     this.touch();
     this.sendJson({ type: "response.cancel" });
     this.turnOpen = false;
   }
 
-  /** Connect with the §7 dial policy (503/429 → backoff and redial). The
+  /** Connect with the §7 dial policy (503/429 → backoff and redial). @internal
+   * — run() dials on first read; tests dial through here. The
    * transport selection (auto: quic → webrtc → ws) happens in the wire
    * factory; a refused dial restarts the whole order. */
   async connect(): Promise<void> {
@@ -781,12 +784,11 @@ export class Session {
     );
   }
 
-  /** Async-iterator of waves: push any given inputs, then run the turn loop. */
-  async *run(inputs?: Iterable<InputFrame> | AsyncIterable<InputFrame>): AsyncGenerator<Wave> {
-    if (!this.wire) await this.connect();
-    if (inputs) {
-      for await (const frame of inputs) this.applyFrame(frame);
-    }
+  /** Async-iterator of waves: THE wave-iteration path. Dials on first read
+   * (never after a close or a terminal end — the stream just ends); input
+   * streams in through attach(). */
+  async *run(): AsyncGenerator<Wave> {
+    if (!this.wire && !this.isClosed && !this.streamsEnded) await this.connect();
     for (;;) {
       // The turn opens on first input: an empty audio commit is
       // refused and leaves the turn audio-less forever.
@@ -801,58 +803,38 @@ export class Session {
     }
   }
 
-  private applyFrame(frame: InputFrame): void {
-    if ("audio" in frame) this.emitAudio(toB64(frame.audio), frame.source);
-    else if ("video" in frame) this.emitVideo(frame.video instanceof Uint8Array ? frame.video : new Uint8Array(frame.video));
-    else if ("text" in frame) this.emitText(frame.text, frame.mode ?? "append");
-  }
-
-  /** Latest result for a question, or null before the first wave. */
-  latest(question: string): Result | null {
-    return this.context.get(question);
-  }
-
-  /** Iterate waves live; coalesce drops earlier waves in runs of identical
-   * argmax values (latest wins). */
-  async *waves(opts: { coalesce?: boolean } = {}): AsyncGenerator<Wave> {
-    let pending: Wave | null = null;
-    for (;;) {
-      const wave = await this.nextWave();
-      if (wave === null) {
-        this.throwIfCreditsFatal();
-        break;
-      }
-      if (wave === undefined) continue; // wake: re-check the turn-open
-      if (!opts.coalesce) {
-        yield wave;
-        continue;
-      }
-      if (pending && coalesceSignature(pending) === coalesceSignature(wave)) pending = wave;
-      else {
-        if (pending) yield pending;
-        pending = wave;
-      }
+  /** THE input path — one call, one sources object: `{ stream?, audio?,
+   * video?, text? }`. `stream` is a live browser MediaStream (mic and/or
+   * camera, resampled to PCM16 24 kHz mono audio + JPEG video at the session
+   * cadence); audio chunks are PCM16 24 kHz mono bytes, video chunks are JPEG
+   * bytes, text chunks are strings appended to the transcript — each source
+   * is an async iterable, a sync iterable, or a zero-arg callable returning
+   * the next chunk (null/undefined ends it). Returns a handle whose
+   * detach() stops everything attached here; a MediaStream's tracks stay
+   * owned by the caller. Iterate `run()` to consume the waves. */
+  async attach(sources: InputSources, opts?: AttachOptions): Promise<AttachHandle> {
+    let stopped = false;
+    const stops: (() => void)[] = [];
+    const handle: AttachHandle = {
+      detach: () => {
+        stopped = true;
+        for (const stop of stops.splice(0)) stop();
+      },
+    };
+    if (sources.stream !== undefined) {
+      const media = await attachStream(this, sources.stream, opts);
+      stops.push(() => media.detach());
     }
-    if (pending) yield pending;
-  }
-
-  when(pred: Predicate, handler: WaveHandler): { cancel(): void } {
-    return this.context.when(pred, handler);
-  }
-
-  /** Observe waves live; `coalesce` delivers the FIRST wave of a run of
-   * consecutive same-argmax waves — later waves update `latest()` without
-   * another callback. */
-  onWave(handler: WaveHandler, opts: { coalesce?: boolean } = {}): { cancel(): void } {
-    return this.context.onWave(handler, opts);
-  }
-
-  /** Browser-only one-liner: stream a live MediaStream (mic and/or camera)
-   * into the session. Audio is resampled to PCM16 24 kHz mono and pushed in
-   * 40 ms chunks; video is sampled to JPEG at the session cadence. Returns a
-   * handle with stop(); the stream's tracks stay owned by the caller. */
-  attach(stream: AttachStream, opts?: AttachOptions): Promise<AttachHandle> {
-    return attachStream(this, stream, opts);
+    for (const kind of ["audio", "video", "text"] as const) {
+      const src = sources[kind];
+      if (src === undefined || src === null) continue;
+      const pump = pumpSource(this, kind, src, () => stopped);
+      stops.push(pump.return);
+      void pump.done.catch((err: unknown) =>
+        console.error(`[sense] ${kind} input pump failed: ${errMessage(err)}`),
+      );
+    }
+    return handle;
   }
 
   async close(): Promise<void> {
@@ -865,44 +847,79 @@ export class Session {
   }
 }
 
-export type InputFrame =
-  | { audio: Uint8Array | ArrayBuffer; source?: string }
-  | { video: Uint8Array | ArrayBuffer }
-  | { text: string; mode?: "append" | "replace" | "event" };
+/** One programmatic input source: an async iterable, a sync iterable, or a
+ * zero-arg callable returning the next chunk (null/undefined ends it). */
+export type InputStreamSource =
+  | AsyncIterable<unknown>
+  | Iterable<unknown>
+  | (() => unknown | null | undefined | Promise<unknown | null | undefined>);
 
-function toB64(data: Uint8Array | ArrayBuffer): string {
-  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+/** Attach sources — one call, one object. `stream` is the live browser
+ * MediaStream path; the rest are programmatic pumps: audio chunks are
+ * PCM16 24 kHz mono bytes, video chunks are JPEG bytes, text chunks are
+ * strings appended to the transcript (append mode). */
+export interface InputSources {
+  stream?: AttachStream;
+  audio?: InputStreamSource;
+  video?: InputStreamSource;
+  text?: InputStreamSource;
+}
+
+type TextMode = "append" | "replace" | "event";
+
+function pumpSource(
+  session: Session,
+  kind: "audio" | "video" | "text",
+  src: InputStreamSource,
+  isStopped: () => boolean,
+): { done: Promise<void>; return(): void } {
+  const push = (chunk: unknown): void => {
+    if (kind === "audio") session.emitAudio(toB64(chunk as Uint8Array | ArrayBuffer));
+    else if (kind === "video") session.emitVideo(chunk as Uint8Array | ArrayBuffer);
+    else session.emitText(String(chunk), "append");
+  };
+  if (typeof src === "function") {
+    const done = (async () => {
+      for (;;) {
+        if (isStopped()) return;
+        const chunk = await src();
+        if (chunk === null || chunk === undefined) return;
+        push(chunk);
+      }
+    })();
+    return { done, return: () => {} }; // cooperative: observed at the next call
   }
-  return btoa(bin);
+  const it: AsyncIterator<unknown> =
+    typeof (src as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function"
+      ? (src as AsyncIterable<unknown>)[Symbol.asyncIterator]()
+      : syncAsAsync((src as Iterable<unknown>)[Symbol.iterator]());
+  const done = (async () => {
+    try {
+      for (;;) {
+        const r = await it.next();
+        if (r.done || isStopped()) return;
+        push(r.value);
+      }
+    } finally {
+      await it.return?.().catch(() => {}); // release a blocked producer
+    }
+  })();
+  return {
+    done,
+    return: () => {
+      void it.return?.().catch(() => {});
+    },
+  };
 }
 
-function coalesceSignature(w: Wave): string {
-  return w.questionIds().map((qid) => `${qid}=${w.result(qid).top}`).join(";");
+/** Minimal AsyncIterator view over a sync iterator. */
+function syncAsAsync(sync: Iterator<unknown>): AsyncIterator<unknown> {
+  return {
+    next: () => Promise.resolve(sync.next()),
+    return: (value?: unknown) => {
+      sync.return?.(value);
+      return Promise.resolve({ value, done: true });
+    },
+  } as AsyncIterator<unknown>;
 }
 
-export class AudioInput {
-  constructor(private session: Session) {}
-  /** Push PCM16 24 kHz mono (encoded base64 on the wire). */
-  push(pcm: Uint8Array | ArrayBuffer, source?: string): void {
-    this.session.emitAudio(toB64(pcm), source);
-  }
-}
-
-export class VideoInput {
-  constructor(private session: Session) {}
-  push(jpeg: Uint8Array | ArrayBuffer): void {
-    this.session.emitVideo(jpeg instanceof Uint8Array ? jpeg : new Uint8Array(jpeg));
-  }
-}
-
-export type TextMode = "append" | "replace" | "event";
-
-export class TextInput {
-  constructor(private session: Session) {}
-  push(text: string, mode: TextMode = "append"): void {
-    this.session.emitText(text, mode);
-  }
-}

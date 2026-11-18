@@ -42,54 +42,54 @@ After connecting, the SDK sends `session.update`. `instructions` is a **JSON str
   "session": {
     "model": "sense-latest:bf16",
     "modalities": ["text"],
-    "instructions": "{\"questions\":{\"speech\":{\"kind\":\"noul\",\"prompt\":\"Is someone speaking?\"}},\"hz\":25.0}"
+    "instructions": "{\"questions\":{\"speech\":{\"type\":\"noul\",\"instructions\":\"Is someone speaking?\"}},\"hz\":12.5}"
   }
 }
 ```
 
-Decoded, the instructions envelope has this shape:
+Decoded, the instructions envelope has this shape — each question is exactly Jev's (TypeSafe System One) shape, `type` + `instructions` + `criteria`, keyed by the question name:
 
 ```json
 {
   "questions": {
-    "speech": {"kind": "noul", "prompt": "Is someone speaking?"},
+    "speech": {"type": "noul", "instructions": "Is someone speaking?"},
     "intent": {
-      "kind": "choice",
-      "prompt": "What does the user want?",
-      "options": [
-        {"name": "support", "description": "Technical help"},
-        {"name": "sales", "description": "Product information"}
-      ]
+      "type": "choice",
+      "instructions": "What does the person want?",
+      "criteria": {
+        "support": "Technical help",
+        "sales": "Product information"
+      }
     },
     "urgency": {
-      "kind": "score",
-      "prompt": "How urgent is the request?",
-      "criteria": ["low", "medium", "high"]
+      "type": "score",
+      "instructions": "How urgent is the request?",
+      "criteria": ["routine, can wait", "time sensitive today", "blocking, act now"]
     }
   },
-  "hz": 25.0
+  "hz": 12.5
 }
 ```
 
-`hz` is the requested number of waves per second. The SDK resends the current question envelope in `response.create.response.instructions` when opening a turn. Changing a local question object does not update an already-running response.
+`hz` is the requested number of waves per second; the SDK default (and the maximum it accepts) is 12.5. The SDK resends the current question envelope in `response.create.response.instructions` when opening a turn. Changing a local question object does not update an already-running response.
 
-Register Python questions before connecting. Its wave assembler snapshots the question registry once per connection; later turns resend the envelope but do not refresh that snapshot. Use a new session/connection for a changed registry. TypeScript's `Session.setQuestions()` replaces its registry and requests cancellation so the next turn uses the new schema.
+Python's `session.set_questions(questions)` replaces its registry, barges in, and re-sends `session.update` so the next turn uses the new schema (call it from async code). TypeScript's `Session.setQuestions()` does the same.
 
 ### Question kinds
 
 | Kind | Registration | Result |
 |---|---|---|
-| `noul` | `kind`, `prompt`, and optional `options` | Boolean decision with P(true) |
-| `choice` | `kind`, `prompt`, and `options` containing named choices | One option and its probability distribution |
-| `score` | `kind`, `prompt`, and `criteria`, an ordered array of 2–10 level descriptions | Distribution over level indices and an expected ordinal value |
+| `noul` | `type`, `instructions`, and optional `criteria` (`{"true": …, "false": …}` descriptions) | Boolean decision with P(true) |
+| `choice` | `type`, `instructions`, and `criteria`, a name → description map | One option and its probability distribution |
+| `score` | `type`, `instructions`, and `criteria`, an ordered array of 2–10 level descriptions (low end first) | Distribution over level indices and an expected ordinal value |
 
-Options and levels can carry a description each, Jev-style:
+Criteria carry a description for every entry, Jev-style:
 
-- `choice` sends `criteria` as a name → description map, e.g. `{"returns": "Exchanges, wrong or damaged items", "billing": "Payment questions"}` — insertion order is the wire order. The bare `options` list of names or `{name, description}` objects is still accepted.
-- `score` sends `criteria` as a name → description map (insertion order is the ordinal order) or the ordered array of level names.
-- `noul` keeps the documented pair form; option pairs can carry a label and description, for example `[["no","Not speaking"],["yes","Speaking"]]` — the first option is the false arm. The standard decision representation uses `true`/`false` labels.
+- `choice` sends `criteria` as a name → description map, e.g. `{"returns": "Exchanges, wrong or damaged items", "billing": "Payment questions"}` — insertion order is the wire order. The option names are the decision labels.
+- `score` sends `criteria` as the ordered array of level descriptions; the level indices correspond to the array order, and the argmax level's description is the decision label.
+- `noul` may declare `criteria` as a `{"true": …, "false": …}` description map; without it the standard `true`/`false` representation applies.
 
-Score criteria must be ordered (array or map), not a prose string: the level indices must correspond to the registered levels.
+Score criteria must be the ordered description array, not a prose string: the level indices must correspond to the registered levels.
 
 Questions are unconditional within a wave. The SDK envelope does not send `when` or `depends_on`; SDK predicates and `when` handlers run client-side after decisions arrive.
 
@@ -111,7 +111,7 @@ For an audio-driven turn, the sequence is:
 {
   "type": "response.create",
   "response": {
-    "instructions": "{\"questions\":{\"speech\":{\"kind\":\"noul\",\"prompt\":\"Is someone speaking?\"}},\"hz\":25.0}",
+    "instructions": "{\"questions\":{\"speech\":{\"type\":\"noul\",\"instructions\":\"Is someone speaking?\"}},\"hz\":12.5}",
     "max_output_tokens": 250000
   }
 }
@@ -271,17 +271,15 @@ Retry policies differ. Python retries transient WebSocket/network failures with 
 | SDK operation | Wire behavior |
 |---|---|
 | Create `Sense` / `Session` | Configure endpoint, model, credentials, cadence, and transport; registration is sent when connected |
-| `app.noul`, `app.choice`, `app.score` | Build question entries in the instructions envelope |
-| `session.audio.push` | Queue or send `input_audio_buffer.append` |
-| `session.video.push` | Queue or send `conversation.item.create` with `input_image` |
-| `session.text.push` | Update text to send as `input_text` |
+| `app.noul`, `app.choice`, `app.score` | Build Jev-shaped question entries (`type`/`instructions`/`criteria`) in the instructions envelope |
+| `session.attach(...)` | The one canonical input path: pumps audio (`input_audio_buffer.append`), video (`conversation.item.create` with `input_image`), and text (`input_text`) from the attached sources |
 | `session.run()` | Connect/register, drive turns, assemble decisions, and yield waves |
 | `Wave` | Decoded complete answer set (§6) |
 | Predicates and handlers | Client-side evaluation; they do not suppress server questions |
 
-Python's `run(audio=…, video=…, text=…)` pumps inputs concurrently with wave consumption. TypeScript's `run(inputs)` consumes the supplied iterable before entering its wave loop; for continuous media, use concurrent input pushes and wave consumption as shown in the [README](../README.md).
+Python's `session.attach(audio=…, video=…, text=…)` pumps inputs concurrently with wave consumption. TypeScript's `session.attach(stream | sources)` streams a live browser MediaStream or programmatic sources the same way; `run()` dials on first read and is the wave loop in both. Audio pushed before the dial is buffered client-side and replayed onto the fresh wire before any turn opens. See the [README](../README.md).
 
-Python `Context.cancel()` normally also requests `response.cancel`; `barge_in=False` cancels only the tracked task. TypeScript `Context.cancel()` aborts the tracked run; `Session.bargeIn()` separately sends `response.cancel`.
+Python `Context.cancel()` normally also requests `response.cancel`; `barge_in=False` cancels only the tracked task. TypeScript `Context.cancel(key)` matches: it barges in by default and takes `{ bargeIn: false }` to cancel only the tracked run.
 
 ### 8.1 Named sources and limitations
 

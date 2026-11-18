@@ -50,11 +50,10 @@ def read_json(name: str):
 
 questions = [
     Question(
-        id=qid,
-        kind=QuestionKind(q["kind"]),
-        prompt=q["prompt"],
-        options=q.get("options"),
-        levels=q.get("levels"),
+        name=qid,
+        kind=QuestionKind(q["type"]),
+        instructions=q["instructions"],
+        criteria=q.get("criteria"),
     )
     for qid, q in read_json("questions.json")["questions"].items()
 ]
@@ -222,15 +221,23 @@ async def main() -> None:
 
     try:
         app = Sense(api_key="test-key", base_url=f"http://127.0.0.1:{port}")
-        finished = app.noul("Did the speaker just finish their turn?", id="finished")
-        intent = app.choice("What does the user want?", ["support", "sales", "other"], id="intent")
-        app.score("How urgent is the request?", ["low", "medium", "high"], id="urgency")
+        finished = app.noul("finished", instructions="Did the speaker just finish their turn?")
+        intent = app.choice(
+            "intent",
+            instructions="What does the person want?",
+            criteria={"support": "Technical help", "sales": "Buying questions", "other": "Anything else"},
+        )
+        app.score(
+            "urgency",
+            instructions="How urgent is the request?",
+            criteria=["routine, can wait", "time sensitive today", "blocking, act now"],
+        )
 
         session = app.session()
         raw, coalesced, when_fires = [], [], []
-        session.onWave(lambda ctx: raw.append(ctx.latest()))
-        session.onWave(lambda ctx: coalesced.append(ctx.latest()), coalesce=True)
-        session.when(
+        app.on_wave(lambda ctx: raw.append(ctx.latest()))
+        app.on_wave(lambda ctx: coalesced.append(ctx.latest()), coalesce=True)
+        app.when(
             finished & (intent == "support"),
             lambda ctx: when_fires.append(ctx.latest().wave_id),
         )
@@ -240,7 +247,7 @@ async def main() -> None:
                 pass
 
         task = asyncio.create_task(run_session())
-        session.audio.push(b"\x00\x00" * 48)
+        session.attach(audio=iter([b"\x00\x00" * 48]))
         for _ in range(1000):
             if len(raw) >= len(TURNS):
                 break
@@ -255,17 +262,17 @@ async def main() -> None:
             assert isinstance(w.result("finished").value, bool)
             u = w.result("urgency")
             assert isinstance(u, Score)
-            assert u.top in ("low", "medium", "high")
+            assert u.top in ("routine, can wait", "time sensitive today", "blocking, act now")
         expected_fire_ids = [raw[i].wave_id for i in range(0, len(raw), len(TURNS))]
         assert when_fires == expected_fire_ids, (
             f"edge-triggered when must fire exactly on the first wave of each "
             f"four-turn sequence, got {when_fires}, want {expected_fire_ids}"
         )
         assert len(coalesced) < len(raw), (
-            f"onWave(coalesce) must skip same-argmax runs ({len(coalesced)} vs {len(raw)})"
+            f"on_wave(coalesce) must skip same-argmax runs ({len(coalesced)} vs {len(raw)})"
         )
         assert len(coalesced) >= 2, (
-            "onWave(coalesce) must still deliver the first wave of each matching run"
+            "on_wave(coalesce) must still deliver the first wave of each matching run"
         )
 
         task.cancel()

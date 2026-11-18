@@ -32,15 +32,14 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def load_questions():
-    """questions.json keys ARE the ids (the map key is the question id)."""
+    """questions.json keys ARE the names (the map key is the answer key)."""
     raw = json.loads((FIXTURES / "questions.json").read_text())["questions"]
     return [
         Question(
-            id=qid,
-            kind=QuestionKind(q["kind"]),
-            prompt=q["prompt"],
-            options=q.get("options"),
-            levels=q.get("levels"),
+            name=qid,
+            kind=QuestionKind(q["type"]),
+            instructions=q["instructions"],
+            criteria=q.get("criteria"),
         )
         for qid, q in raw.items()
     ]
@@ -116,8 +115,11 @@ class TestWaveDecoding(unittest.TestCase):
             self.assertIn(i.value, ("support", "sales", "other"))
             u = w.result("urgency")
             self.assertIsInstance(u, Score)
-            self.assertIn(u.top, ("low", "medium", "high"))
-            self.assertAlmostEqual(u.p_at_least("low"), 1.0)
+            self.assertIn(
+                u.top,
+                ("routine, can wait", "time sensitive today", "blocking, act now"),
+            )
+            self.assertAlmostEqual(u.p_at_least(0), 1.0)
 
 
 class TestPredicates(unittest.TestCase):
@@ -210,7 +212,7 @@ class TestContext(unittest.TestCase):
     def test_onwave(self):
         ctx = Context()
         seen = []
-        ctx.onWave(lambda ctx: seen.append(ctx.latest().wave_id))
+        ctx.on_wave(lambda ctx: seen.append(ctx.latest().wave_id))
         for p in self.payloads:
             ctx._ingest(Wave.decode(self.questions, p))
         self.assertEqual(seen, [w.wave_id for w in ctx.waves()])
@@ -240,11 +242,18 @@ class TestSession(unittest.TestCase):
         self.assertEqual(s.questions, [])
         self.assertFalse(s._closed)
         self.assertEqual(s.base_url, Session.DEFAULT_BASE_URL)
+        self.assertEqual(s.hz, 12.5)
+
+    def test_hz_ceiling(self):
+        with self.assertRaises(ValueError):
+            Session(api_key="sk-test", hz=25.0)
+        with self.assertRaises(ValueError):
+            Session(api_key="sk-test", hz=0)
 
     def test_question_registration_shape(self):
         s = Session(api_key="sk-test")
-        q = s.add_question("finished", QuestionKind.BOOL, prompt="did they finish?")
-        self.assertEqual(q.id, "finished")
+        q = Question(name="finished", kind=QuestionKind.NOUL, instructions="did they finish?")
+        s.set_questions([q])
         self.assertEqual(s.questions, [q])
 
     def test_streaming_wire_shape(self):
@@ -253,15 +262,22 @@ class TestSession(unittest.TestCase):
         # input_audio_buffer.append frame a fake lane receives.
         async def go():
             s = Session(api_key="sk-test")
-            s.add_question("finished", QuestionKind.NOUL, prompt="did they finish?")
-            s.add_question(
-                "intent", QuestionKind.CHOICE, prompt="want?", options=["support", "sales", "other"]
-            )
-            s.add_question(
-                "urgency",
-                QuestionKind.SCORE,
-                prompt="how urgent?",
-                levels=["low", "medium", "high"],
+            s.set_questions(
+                [
+                    Question(name="finished", kind=QuestionKind.NOUL, instructions="did they finish?"),
+                    Question(
+                        name="intent",
+                        kind=QuestionKind.CHOICE,
+                        instructions="want?",
+                        criteria={"support": "Technical help", "sales": "Buying questions"},
+                    ),
+                    Question(
+                        name="urgency",
+                        kind=QuestionKind.SCORE,
+                        instructions="how urgent?",
+                        criteria=["low — routine", "high — blocking right now"],
+                    ),
+                ]
             )
             frames = []
 
@@ -270,26 +286,35 @@ class TestSession(unittest.TestCase):
                     frames.append(payload)
 
             await s._hello(FakeWS())
-            # the session.update envelope: real JSON, real shape
+            # the session.update envelope: real JSON, real shape — exactly
+            # Jev's keys (type/instructions/criteria), nothing invented.
             self.assertEqual(frames[0]["type"], "session.update")
             env = json.loads(frames[0]["session"]["instructions"])
             self.assertEqual(env["hz"], s.hz)
             fin = env["questions"]["finished"]
-            self.assertEqual(sorted(fin.keys()), ["kind", "prompt"])
-            self.assertEqual(fin["kind"], "noul")
+            self.assertEqual(sorted(fin.keys()), ["instructions", "type"])
+            self.assertEqual(fin["type"], "noul")
             intent = env["questions"]["intent"]
-            self.assertEqual([o["name"] for o in intent["options"]], ["support", "sales", "other"])
-            self.assertEqual(env["questions"]["urgency"]["criteria"], ["low", "medium", "high"])
-            # noul options are canonicalized to [no, yes] order (protocol §2)
-            s.add_question("good", QuestionKind.NOUL, prompt="all good?", options=["yes", "no"])
-            frames.clear()
-            await s._hello(FakeWS())
-            env = json.loads(frames[0]["session"]["instructions"])
-            self.assertEqual(env["questions"]["good"]["options"], [["no", ""], ["yes", ""]])
+            self.assertEqual(
+                intent,
+                {
+                    "type": "choice",
+                    "instructions": "want?",
+                    "criteria": {"support": "Technical help", "sales": "Buying questions"},
+                },
+            )
+            self.assertEqual(
+                env["questions"]["urgency"],
+                {
+                    "type": "score",
+                    "instructions": "how urgent?",
+                    "criteria": ["low — routine", "high — blocking right now"],
+                },
+            )
             # the input_audio_buffer.append frame a fake lane receives for one
             # PCM16 chunk (no commit, no response.create while the turn is open)
             s._turn_open = True
-            s.audio.push(b"\x00\x00")
+            s._audio_in.push(b"\x00\x00")
             frames.clear()
             ok = await s._drain_outbound(FakeWS())
             self.assertTrue(ok)

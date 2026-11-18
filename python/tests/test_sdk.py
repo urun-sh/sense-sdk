@@ -22,18 +22,18 @@ from sense import (
 
 def questions():
     return [
-        Question(id="finished", kind=QuestionKind.NOUL, prompt="finished?"),
+        Question(name="finished", kind=QuestionKind.NOUL, instructions="finished?"),
         Question(
-            id="intent",
+            name="intent",
             kind=QuestionKind.CHOICE,
-            prompt="want?",
-            options=["support", "sales", "other"],
+            instructions="want?",
+            criteria={"support": "Technical help", "sales": "Buying questions", "other": "Anything else"},
         ),
         Question(
-            id="urgency",
+            name="urgency",
             kind=QuestionKind.SCORE,
-            prompt="urgent?",
-            levels=["low", "medium", "high"],
+            instructions="urgent?",
+            criteria=["routine, can wait", "time sensitive today", "blocking, act now"],
         ),
     ]
 
@@ -99,10 +99,10 @@ def test_score_semantics():
     u = w.result("urgency")
     assert isinstance(u, Score)
     assert u.value == pytest.approx(0.4 + 2 * 0.5)  # expected ordinal
-    assert u.top == u.level == "high"
-    assert u.p_at_least("medium") == pytest.approx(0.9)  # p1 + p2
-    assert u.p_at_least("high") == pytest.approx(0.5)
-    assert u.p_at_least("low") == pytest.approx(1.0)
+    assert u.top == u.level == "blocking, act now"  # the level's description
+    assert u.p_at_least("time sensitive today") == pytest.approx(0.9)  # p1 + p2
+    assert u.p_at_least(2) == pytest.approx(0.5)  # index form
+    assert u.p_at_least(0) == pytest.approx(1.0)
     with pytest.raises(ProtocolError):
         u.p_at_least("nope")
 
@@ -151,13 +151,13 @@ def test_score_predicate_subjects():
     urgency = questions()[2]
     w = Wave.decode(questions(), payload(0, 0))
     assert (urgency.value >= 1.0)(w)
-    assert (urgency.top == "high")(w)
-    assert (urgency.p_at_least("medium") >= 0.5)(w)
-    assert (urgency == "high")(w)  # q-subject is the level NAME
+    assert (urgency.top == "blocking, act now")(w)
+    assert (urgency.p_at_least("time sensitive today") >= 0.5)(w)
+    assert (urgency == "blocking, act now")(w)  # q-subject is the top level text
 
 
 def test_between_latches():
-    pred = Predicate.between(("p_at_least", "urgency", "medium"), 0.5, 0.3)
+    pred = Predicate.between(("p_at_least", "urgency", "time sensitive today"), 0.5, 0.3)
     vals = [
         {"0": 0.9, "1": 0.05, "2": 0.05},  # 0.1 below exit -> False
         {"0": 0.4, "1": 0.3, "2": 0.3},  # 0.6 >= enter -> True (latch)
@@ -230,7 +230,7 @@ def test_when_edges_and_cancel():
 def test_onwave_and_get():
     ctx = Context()
     seen = []
-    ctx.onWave(lambda c: seen.append(c.latest().wave_id))
+    ctx.on_wave(lambda c: seen.append(c.latest().wave_id))
     _feed(ctx, [payload(0, 0), payload(1, 40)])
     assert seen == [0, 1]
     assert ctx.get("intent").value == "support"
@@ -271,41 +271,38 @@ def test_session_event():
 
 def test_facade_registers_questions():
     app = Sense(api_key="k")
-    app.noul("finished?", id="finished")
-    app.choice("want?", ["support", "other"], id="intent")
-    app.score("urgent?", ["low", "high"], id="urgency")
+    app.noul("finished", instructions="finished?")
+    app.choice("intent", instructions="want?", criteria={"support": "Technical help", "other": "Anything else"})
+    app.score("urgency", instructions="urgent?", criteria=["routine, can wait", "blocking, act now"])
     s = app.session()
-    assert [q.id for q in s.questions] == ["finished", "intent", "urgency"]
+    assert [q.name for q in s.questions] == ["finished", "intent", "urgency"]
     env = s._envelope()
-    assert env["questions"]["finished"]["kind"] == "noul"
-    assert env["questions"]["intent"]["options"] == [
-        {"name": "support", "description": ""},
-        {"name": "other", "description": ""},
-    ]
-    assert env["questions"]["urgency"]["criteria"] == ["low", "high"]
-    assert callable(app.predicate(lambda w: True))
+    assert env["questions"]["finished"] == {"type": "noul", "instructions": "finished?"}
+    assert env["questions"]["intent"]["criteria"] == {
+        "support": "Technical help",
+        "other": "Anything else",
+    }
+    assert env["questions"]["urgency"]["criteria"] == ["routine, can wait", "blocking, act now"]
+    assert callable(Predicate(lambda w: True))
 
 
-def test_text_first_questions():
+def test_jev_shape_only():
+    # No invented syntax: no id=, no auto-id, no bare option lists. The name
+    # is the answer key; instructions and criteria are Jev's fields.
     app = Sense(api_key="k")
-    finished = app.noul("Did the speaker just finish?")
-    intent = app.choice("What does the user want?", ["support", "sales", "other"])
-    assert finished.prompt == "Did the speaker just finish?"
-    # auto-slugged ids: lowercase, non-alnum -> _, unique
-    assert finished.id == "did_the_speaker_just_finish"
-    assert intent.id == "what_does_the_user_want"
-    s2 = Sense(api_key="k")
-    a = s2.noul("Same text?")
-    b = s2.noul("Same text?")
-    assert a.id != b.id and a.id.startswith("same_text")
-    # explicit id wins; empty text is rejected
-    assert s2.noul("Another question?", id="explicit").id == "explicit"
+    with pytest.raises(TypeError):
+        app.noul("finished?", id="finished")
     with pytest.raises(ValueError):
-        s2.noul("   ")
+        app.choice("intent", instructions="want?", criteria=["support", "other"])
+    # a two-level description array IS Jev's score shape; a map is not
     with pytest.raises(ValueError):
-        s2.choice("x?", ["a"], id="")
+        app.score("urgency", instructions="urgent?", criteria={"low": "label", "high": "label"})
     with pytest.raises(ValueError):
-        s2.choice("", ["a"])
+        app.choice("intent", instructions="want?", criteria={"support": "", "other": "fine"})
+    with pytest.raises(ValueError):
+        app.noul("n", instructions="")
+    with pytest.raises(ValueError):
+        app.noul("", instructions="empty name?")
     # no id-first overload remains
     import inspect
 
@@ -315,11 +312,11 @@ def test_text_first_questions():
             for p in inspect.signature(getattr(Sense, name)).parameters.values()
             if p.name != "self"
         ]
-        assert (
-            params[0].name == "question"
-            and params[0].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        assert params[0].name == "name" and params[0].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        assert all(
+            p.name in ("instructions", "criteria") and p.kind is inspect.Parameter.KEYWORD_ONLY
+            for p in params[1:]
         )
-        assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in params[1:] if p.name == "id")
 
 
 def test_when_decorator_returns_fn():
@@ -338,10 +335,25 @@ def test_session_defaults():
     assert s.questions == []
     assert not s._closed
     assert s.base_url == Session.DEFAULT_BASE_URL
-    q = s.add_question("finished", QuestionKind.BOOL, prompt="did they finish?")
-    assert q.id == "finished"
+    assert s.hz == 12.5
+    q = Question(name="finished", kind=QuestionKind.NOUL, instructions="did they finish?")
+    s.set_questions([q])
     assert s.questions == [q]
     assert s._realtime_url() == "wss://inference.urun.sh/v1/realtime?model=sense-latest:bf16"
+
+
+def test_hz_ceiling():
+    # 12.5 is the default AND the ceiling: one seat's sustained floor.
+    with pytest.raises(ValueError):
+        Session(api_key="sk-test", hz=25.0)
+    with pytest.raises(ValueError):
+        Session(api_key="sk-test", hz=13)
+    with pytest.raises(ValueError):
+        Session(api_key="sk-test", hz=0)
+    with pytest.raises(ValueError):
+        Session(api_key="sk-test", hz=float("nan"))
+    assert Session(api_key="sk-test", hz=12.5).hz == 12.5
+    assert Sense(hz=2).session().hz == 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -351,11 +363,11 @@ def test_session_defaults():
 
 def test_score_bare_comparison_rule():
     urgency = questions()[2]
-    w = Wave.decode(questions(), payload(0, 0))  # top=high, value=1.4
-    # eq/ne compare the TOP LEVEL NAME
-    assert (urgency == "high")(w)
-    assert not (urgency == "low")(w)
-    assert (urgency != "low")(w)
+    w = Wave.decode(questions(), payload(0, 0))  # top="blocking, act now", value=1.4
+    # eq/ne compare the TOP LEVEL (the level's description text)
+    assert (urgency == "blocking, act now")(w)
+    assert not (urgency == "routine, can wait")(w)
+    assert (urgency != "routine, can wait")(w)
     # gt/gte/lt/lte compare the EXPECTED ORDINAL
     assert (urgency >= 1.0)(w)
     assert not (urgency >= 2.0)(w)
@@ -363,7 +375,7 @@ def test_score_bare_comparison_rule():
     assert not (urgency > 1.4)(w)
     # gte on a string ordinal is not the name comparison
     with pytest.raises(TypeError):
-        (urgency >= "high")(w)
+        (urgency >= "blocking, act now")(w)
 
 
 def test_question_vs_question_is_identity():
@@ -376,26 +388,32 @@ def test_question_vs_question_is_identity():
 
 
 # ---------------------------------------------------------------------------
-# nits: registration validation, duplicate ids, signal, history bound
+# nits: registration validation, duplicate names, signal, history bound
 # ---------------------------------------------------------------------------
 
 
-def test_add_question_replaces_duplicate():
+def test_set_questions_replaces_duplicate():
     s = Session(api_key="sk-test")
-    s.add_question("finished", QuestionKind.NOUL, prompt="a?")
-    q2 = s.add_question("finished", QuestionKind.NOUL, prompt="b?")
+    q1 = Question(name="finished", kind=QuestionKind.NOUL, instructions="a?")
+    s.set_questions([q1])
+    q2 = Question(name="finished", kind=QuestionKind.NOUL, instructions="b?")
+    s.set_questions([q2])
     assert len(s.questions) == 1 and s.questions[0] is q2
 
 
 def test_score_levels_validated_2_to_10():
-    s = Session(api_key="sk-test")
     with pytest.raises(ValueError):
-        s.add_question("u", QuestionKind.SCORE, levels=["only"])
+        Question(name="u", kind=QuestionKind.SCORE, instructions="u?", criteria=["only"])
     with pytest.raises(ValueError):
-        s.add_question("u", QuestionKind.SCORE, levels=[str(i) for i in range(11)])
-    s.add_question("u", QuestionKind.SCORE, levels=["low", "high"])  # ok
+        Question(
+            name="u",
+            kind=QuestionKind.SCORE,
+            instructions="u?",
+            criteria=[str(i) for i in range(11)],
+        )
+    Question(name="u", kind=QuestionKind.SCORE, instructions="u?", criteria=["low", "high"])  # ok
     with pytest.raises(ValueError):
-        Question(id="v", kind=QuestionKind.SCORE, levels=["one"])
+        Question(name="v", kind=QuestionKind.SCORE, instructions="v?", criteria=["one"])
 
 
 def test_context_run_signal():
@@ -454,24 +472,18 @@ def test_history_bounded_512():
     assert ctx.waves()[0].wave_id == 88  # 600 - 512
 
 
-def test_session_waves_is_live_subscription():
-    async def go():
-        s = Session(api_key="sk-test")
-        got = []
-
-        async def consume():
-            async for w in s.waves():
-                got.append(w.wave_id)
-
-        task = asyncio.create_task(consume())
-        await asyncio.sleep(0)
-        s._accept(Wave.decode(questions(), payload(0, 0)))
-        s._accept(Wave.decode(questions(), payload(1, 40)))
-        await asyncio.sleep(0)
-        assert got == [0, 1]
-        task.cancel()
-
-    asyncio.run(go())
+def test_session_waves_gone_run_is_the_one_iterator():
+    # One wave-iteration path: session.run(). The old live `waves()`
+    # subscription was a second spelling and is deleted.
+    assert not hasattr(Session(api_key="sk-test"), "waves")
+    assert not hasattr(Session(api_key="sk-test"), "latest")
+    assert not hasattr(Session(api_key="sk-test"), "when")
+    assert not hasattr(Session(api_key="sk-test"), "on_wave")
+    assert not hasattr(Sense, "predicate")
+    assert not hasattr(Session(api_key="sk-test"), "audio")
+    assert not hasattr(Session(api_key="sk-test"), "video")
+    assert not hasattr(Session(api_key="sk-test"), "text")
+    assert not hasattr(Session(api_key="sk-test"), "connect")
 
 
 # ---------------------------------------------------------------------------
@@ -544,7 +556,7 @@ def test_wire_text_only_session():
 
             task = asyncio.create_task(_consume(s, got))
             # TEXT ONLY: a text push opens and drives the turn, zero audio.
-            s.text.push("Say something.")
+            s._text_in.push("Say something.")
             for _ in range(500):
                 if got:
                     break
@@ -608,8 +620,17 @@ async def _start_fake(handler):
 
 
 def _register(s):
-    s.add_question("finished", QuestionKind.NOUL, prompt="finished?")
-    s.add_question("intent", QuestionKind.CHOICE, prompt="want?", options=["support", "other"])
+    s.set_questions(
+        [
+            Question(name="finished", kind=QuestionKind.NOUL, instructions="finished?"),
+            Question(
+                name="intent",
+                kind=QuestionKind.CHOICE,
+                instructions="want?",
+                criteria={"support": "Technical help", "other": "Anything else"},
+            ),
+        ]
+    )
 
 
 async def _wait_until(condition, attempts=500):
@@ -706,17 +727,17 @@ def test_wire_happy_path():
 
         runner, port = await _start_fake(handler)
         try:
-            s = Session(api_key="sk-test", base_url=f"http://127.0.0.1:{port}", hz=25.0)
+            s = Session(api_key="sk-test", base_url=f"http://127.0.0.1:{port}", hz=12.5)
             _register(s)
             fired = []
-            s.when(Predicate(("q", "finished", None)), lambda c: fired.append(c.latest().wave_id))
+            s._ctx.when(Predicate(("q", "finished", None)), lambda c: fired.append(c.latest().wave_id))
             got = []
             task = asyncio.create_task(_consume(s, got))
             # Mic-style: each push drives the turn lifecycle. Turn 1 (waves
             # 0+1) opens on the first push; the second push opens turn 2.
-            s.audio.push(b"\x00\x00" * 48)
+            s._audio_in.push(b"\x00\x00" * 48)
             await _wait_until(lambda: len(got) >= 2)
-            s.audio.push(b"\x00\x00" * 48)
+            s._audio_in.push(b"\x00\x00" * 48)
             await _wait_until(lambda: len(got) >= 3)
             task.cancel()
             await s.close()
@@ -724,7 +745,7 @@ def test_wire_happy_path():
             sess = state["update"]["session"]
             assert sess["model"] == "sense-latest:bf16" and sess["modalities"] == ["text"]
             env = json.loads(sess["instructions"])
-            assert env["hz"] == 25.0 and set(env["questions"]) == {"finished", "intent"}
+            assert env["hz"] == 12.5 and set(env["questions"]) == {"finished", "intent"}
             assert [w.wave_id for w in got] == [0, 1, 2]
             assert got[0].t_ms == 0 and got[1].t_ms == 40 and got[2].t_ms == 80
             assert got[0].result("finished").value is True
@@ -773,7 +794,7 @@ def test_wave_t_ms_prefers_the_media_position():
             _register(s)
             got = []
             task = asyncio.create_task(_consume(s, got))
-            s.audio.push(b"\x00\x00" * 48)
+            s._audio_in.push(b"\x00\x00" * 48)
             await _wait_until(lambda: len(got) >= 1)
             task.cancel()
             await s.close()
@@ -811,7 +832,7 @@ def test_wire_incomplete_wave_is_protocol_error():
             got = []
 
             task = asyncio.create_task(_consume(s, got))
-            s.audio.push(b"\x00\x00" * 48)  # the push opens the turn
+            s._audio_in.push(b"\x00\x00" * 48)  # the push opens the turn
             try:
                 await asyncio.wait_for(task, timeout=2.0)
             except asyncio.TimeoutError:
@@ -841,9 +862,9 @@ def test_wire_session_gone_reconnects_fresh():
             # First push opens a turn on connection 1; the lane dies with
             # session_gone, the SDK reconnects fresh, and a second push
             # opens the turn on connection 2.
-            s.audio.push(b"\x00\x00" * 48)
+            s._audio_in.push(b"\x00\x00" * 48)
             await asyncio.sleep(0.3)
-            s.audio.push(b"\x00\x00" * 48)
+            s._audio_in.push(b"\x00\x00" * 48)
             await _wait_until(lambda: len(got) >= 1)
             task.cancel()
             await s.close()
@@ -886,7 +907,7 @@ def test_wire_insufficient_credits_is_terminal():
             _register(s)
             got = []
             task = asyncio.create_task(_consume(s, got))
-            s.audio.push(b"\x00\x00" * 48)  # the push opens the turn
+            s._audio_in.push(b"\x00\x00" * 48)  # the push opens the turn
             with pytest.raises(OutOfCreditsError):
                 await asyncio.wait_for(task, timeout=2.0)
             # The cut is an end, not churn: no reconnect dial may follow.
@@ -915,7 +936,7 @@ def test_wire_close_reason_credits_exhausted_is_terminal():
             _register(s)
             got = []
             task = asyncio.create_task(_consume(s, got))
-            s.audio.push(b"\x00\x00" * 48)
+            s._audio_in.push(b"\x00\x00" * 48)
             with pytest.raises(OutOfCreditsError):
                 await asyncio.wait_for(task, timeout=2.0)
             await asyncio.sleep(0.3)
@@ -994,7 +1015,7 @@ def test_explicit_presence_frames(monkeypatch):
 
         runner, port = await _start_fake(handler)
         try:
-            s = Session(api_key="sk-test", base_url=f"http://127.0.0.1:{port}", hz=25.0)
+            s = Session(api_key="sk-test", base_url=f"http://127.0.0.1:{port}", hz=12.5)
             _register(s)
             got = []
             task = asyncio.create_task(_consume(s, got))
@@ -1003,7 +1024,7 @@ def test_explicit_presence_frames(monkeypatch):
                 return state["types"].count("session.presence")
 
             # App activity keeps the window open: frames flow every cadence.
-            s.text.push("still here")
+            s._text_in.push("still here")
             await _wait_until(lambda: state["types"].count("session.presence") >= 2)
             # The wire frame is exactly the presence marker, no extra fields.
             s.keepalive()
@@ -1020,7 +1041,7 @@ def test_explicit_presence_frames(monkeypatch):
             await asyncio.sleep(0.7)
             assert state["types"].count("session.presence") == n
             # A fresh app send re-asserts presence.
-            s.text.push("back")
+            s._text_in.push("back")
             await _wait_until(lambda: state["types"].count("session.presence") >= n + 1)
             task.cancel()
             await s.close()

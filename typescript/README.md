@@ -2,7 +2,7 @@
 
 TypeScript SDK for uRun's realtime decision model — Sense.
 
-Sense is a *realtime*, *multi-modal* System One model for voice and video agents and was inspired by the Jev model. It runs on continuously streaming media and answers questions about the input many times per second: for example, whether the user is still speaking or done, whether an interruption is a new question or just an "mmmhmm", and what the user's emotional state is.
+Sense is a *realtime*, *multi-modal* System One model for voice and video agents and was inspired by the Jev model. It runs on continuously streaming media and answers questions about the input many times per second: for example, whether the person is still speaking or done, whether an interruption is a new question or just an "mmmhmm", and what the person's emotional state is.
 
 The Sense SDK gives you one unified surface for perception, decision-making, and reactive agent control.
 
@@ -49,23 +49,26 @@ This is an overview of how `@urun-sh/sense` is used to build the demo above. Sen
 - Choices: categorical questions where the answer must be from a list of choices.
 - Scores: again a set of choices but with the important difference that answers naturally form a continuous scale.
 
-**Declare your decisions.** Create the client app and register your nouls, each registration returns a `Question` with an `id` to reference the results by later:
+**Declare your decisions.** Create the client app and register your questions. The NAME is the first positional argument — it is the answer key you reference results by on every wave. Each question carries `instructions` (what to answer) and `criteria` (Jev-style, exactly one shape per kind):
 
 ```ts
 import { Sense, type Session } from "@urun-sh/sense";
 
 const app = new Sense(); // Needs an API key: default from URUN_API_KEY
 
-const speech = app.noul("Is someone speaking right now?", { id: "speech" });
-const cheese = app.noul("Is the speaker talking about cheese right now?", { id: "cheese" });
+const speech = app.noul("speech", {
+    instructions: "Is someone speaking right now?",
+    criteria: { true: "a person is speaking", false: "nobody is speaking" }, // optional
+});
+const cheese = app.noul("cheese", { instructions: "Is the person talking about cheese right now?" });
 ```
 
-The model can also answer non-binary questions from a list of choices — given a `choice` Sense matches from a fixed option list. Options can carry a short description each (a Jev-style `criteria` map — name → description, insertion order preserved); bare name lists work too:
+The model can also answer non-binary questions from a list of choices — given a `choice` Sense matches from a fixed option list. Criteria is the required name → description map (insertion order is the wire order; every option needs a non-empty description):
 
 ```ts
-const kind = app.choice(
-    "Which type of cheese are they talking about?",
-    {
+const kind = app.choice("cheese_type", {
+    instructions: "Which type of cheese are they talking about?",
+    criteria: {
         cheddar: "Firm yellow cheese",
         brie: "Soft white-rind cheese",
         gouda: "Semi-hard Dutch cheese",
@@ -76,27 +79,23 @@ const kind = app.choice(
         feta: "Crumbly brined cheese",
         other: "Any other kind of cheese",
     },
-    { id: "cheese_type" },
-);
+});
 ```
 
-If you want an ordered scale use a `score` — the grades or levels are the range of answers, in this case the user's feeling will be graded in the range (0..4). Levels may be a name → description map (insertion order is the ordinal order) or a bare name list:
+If you want an ordered scale use a `score` — criteria is the ordered array of level descriptions, low end first (2..10 levels). The level label you read back IS the description text:
 
 ```ts
-const feeling = app.score(
-    "How does the speaker feel about that cheese?",
-    { hate: "Disgusted", dislike: "Negative", meh: "Neutral", like: "Positive", love: "Delighted" },
-    { id: "feeling" },
-);
+const feeling = app.score("feeling", {
+    instructions: "How does the person feel about that cheese?",
+    criteria: ["disgusted", "negative", "neutral", "positive", "delighted"],
+});
 ```
 
-**Open a session and start reading waves:** `session.run()` connects to Sense (unless `connect()` already has), registers the questions,
-and yields `waves`. A wave is a batch of decisions taken over the last slice of audio:
+**Open a session and start reading waves:** `session.run()` dials on first read and yields `waves`. A wave is a batch of decisions taken over the last slice of audio:
 
 ```ts
 const session = app.session();
-await session.connect(); // dial before pushing audio — earlier chunks would be dropped
-const waves = session.run(); // returns async iterator
+const waves = session.run(); // returns an async iterator
 
 async function readWaves(): Promise<void> {
     for await (const wave of waves) { // iterations can throw if Sense is unreachable
@@ -105,12 +104,12 @@ async function readWaves(): Promise<void> {
 }
 ```
 
-**Live mic in one line (browser).** `session.attach(stream)` takes a browser MediaStream and does the capture for you — audio is resampled to PCM16 24 kHz mono and pushed in 40 ms chunks, video frames are sampled to JPEG at the session cadence:
+**Stream input with attach() — the one input path.** `session.attach({ stream })` takes a live browser MediaStream and does the capture for you — audio is resampled to PCM16 24 kHz mono and pushed in 40 ms chunks, video frames are sampled to JPEG at the session cadence:
 
 ```ts
 const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true }); // audio-only streams work too
-const attached = await session.attach(stream); // resamples + pushes continuously; returns a handle with stop()
-// later: attached.stop() — stops the pumping; the stream's tracks stay yours to stop
+const attached = await session.attach({ stream }); // resamples + pushes continuously; returns a handle with detach()
+// later: attached.detach() — stops the pumping; the stream's tracks stay yours to stop
 ```
 
 **Browser quickstart (no relay).** Your server keeps the org API key and mints a 10-minute client secret; the browser dials `inference.urun.sh` directly — the dial route (`POST /v1/realtime/calls`) is CORS-open for bearer auth, and the WebTransport/WebRTC media leg needs no relay. A runnable minting server is at [examples/typescript/mint_server.ts](https://github.com/urun-sh/sense-sdk/blob/main/examples/typescript/mint_server.ts):
@@ -128,33 +127,29 @@ const app = new Sense({
 });
 const session = app.session();
 const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-const attached = await session.attach(stream); // the one-liner above, now unattended
+const attached = await session.attach({ stream }); // the one-liner above, now unattended
 ```
 
-**Feed it audio concurrently.** The SDK currently speaks 24 kHz PCM16 mono in 40 ms chunks. The audio push and the wave consumption must run at the same time — a blocking wave loop starves the audio — so we run them as concurrent tasks:
+**Stream programmatic input.** Off the browser, attach sources instead. Each source is an async iterable, a sync iterable, or a zero-arg callable returning the next chunk (null/undefined ends it): audio chunks are PCM16 24 kHz mono bytes, video chunks are JPEG bytes, text chunks are strings appended to the transcript. attach() pumps in the background — no run loop needed for pumping — and the turn opens on the first pushed chunk:
 
 ```ts
-async function sendAudio(chunks: AsyncGenerator<ArrayBuffer>, session: Session): Promise<void> {
-    for await (const chunk of chunks) {
-        session.audio.push(chunk); // PCM16, mono, 24 kHz; one 40 ms block
+const attached = await session.attach({ audio: mic.chunks() }); // mic, file, queue — same path
+async function readWaves(): Promise<void> {
+    for await (const wave of session.run()) {
+        ...
     }
-    await session.close(); // audio ended — end the run loop so readWaves returns
 }
-
-const chunks = mic.chunks();
-const first = await chunks.next(); // the turn opens on the first pushed chunk — push one before the wave loop starts
-if (!first.done) session.audio.push(first.value);
-const tasks = [sendAudio(chunks, session), readWaves()];
 ```
 
-`session.run()` can also take finite audio/video/text inputs and push them for you before reading waves; this example pushes audio manually to keep the mic and the level meter in step.
+`attached.detach()` stops the pumping; the wave loop returns when the source ends or `session.close()` runs.
 
 **Read decisions off each wave.** Every answered question `id` has a `result` with a `.value`, and a confidence/probability `.p`. Additionally:
 - Choices return confidences for each option in `.pOption(name)`(normalized so they form a discrete probability distribution).
 - Scores return:
-  - The argmax grade in `.top`
-  - The probability of that grade in `.p`
-  - The expected index value in `.value`, in this case (0..4) across 5 levels.
+  - The argmax level DESCRIPTION in `.top` (the server echoes the description back as the choice)
+  - The probability of that level in `.p`
+  - The expected index value in `.value`, in this case (0..4) across 5 levels
+  - `pAtLeast(level)`: Σ p over levels at or above a zero-based index or the exact description
 
 You will usually want to gate actions on the probability (the example requires p >= 0.6 to trust any result):
 
@@ -170,14 +165,13 @@ if (detection.p >= 0.6) {
 }
 ```
 
-**Close in the correct order.** Stop the mic and close the session — `session.close()` ends the run loop, so the wave iteration above returns:
+**Close in the correct order.** Stop the pumping and close the session — `session.close()` ends the run loop, so the wave iteration above returns:
 ```ts
 try {
-    await Promise.race(tasks); // first task to finish: mic end or wire death
+    await readWaves(); // first to end: source end or wire death
 } finally {
-    mic.stop(); // unblocks sendAudio when the wave reader ends first
+    attached.detach(); // stops the pumping; a live MediaStream's tracks stay yours to stop
     await session.close();
-    await Promise.all(tasks); // settle both even when the race threw; the race error propagates after
 }
 ```
 

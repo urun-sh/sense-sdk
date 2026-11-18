@@ -3,13 +3,14 @@
 import { describe, expect, test, vi } from "bun:test";
 import { Context, ProtocolError, Question, Sense, Session, Wave } from "../src/index.ts";
 import { HISTORY_MAX } from "../src/context.ts";
+import { toB64 } from "../src/bytes.ts";
 import { errMessage } from "../src/errors.ts";
 import { MAX_LINE_BYTES, NdjsonSplitter, DialRefused, checkBaseUrl, defaultDialers, parseCallsAnswer } from "../src/transport.ts";
 
 const QUESTIONS = [
-  new Question({ id: "finished", kind: "noul" }),
-  new Question({ id: "intent", kind: "choice", options: ["support", "other"] }),
-  new Question({ id: "urgency", kind: "score", levels: ["low", "high"] }),
+  new Question({ name: "finished", kind: "noul" }),
+  new Question({ name: "intent", kind: "choice", instructions: "What does the person want?", criteria: { support: "Help with a problem", other: "Anything else" } }),
+  new Question({ name: "urgency", kind: "score", instructions: "How urgent?", criteria: ["low", "high"] }),
 ];
 
 const GOOD: Record<string, Record<string, unknown>> = {
@@ -161,7 +162,7 @@ describe("resource bounds", () => {
 
   test("named audio sources keep a bounded backlog", async () => {
     const { s } = await connected();
-    for (let i = 0; i < 2000; i++) s.audio.push(new Uint8Array(2), "mic2");
+    for (let i = 0; i < 2000; i++) s.emitAudio(toB64(new Uint8Array(2)), "mic2");
     expect((s as unknown as { sourceQueues: Map<string, string[]> }).sourceQueues.get("mic2")!.length).toBe(1500);
     await s.close();
   });
@@ -182,16 +183,16 @@ describe("application error containment", () => {
   test("a throwing onWave handler or predicate does not escape the wire callback", async () => {
     const { s, w } = await connected();
     let after = 0;
-    s.onWave(() => {
+    s.context.onWave(() => {
       throw new Error("app bug");
     });
-    s.when(
+    s.context.when(
       Object.assign(() => {
         throw new Error("pred bug");
       }, {}) as never,
       () => undefined,
     );
-    s.onWave(() => {
+    s.context.onWave(() => {
       after++;
     });
     expect(() => w.deliverWave()).not.toThrow();
@@ -241,7 +242,7 @@ describe("wire loss", () => {
         for (let d = 0; d < 16; d++) await Promise.resolve(); // drain the redial chain
         w.closeCb?.(1006);
       }
-      const it = s.waves()[Symbol.asyncIterator]();
+      const it = s.run()[Symbol.asyncIterator]();
       expect((await it.next()).done).toBe(false); // the queued wave drains first
       expect((await it.next()).done).toBe(true);
       await s.close();
@@ -265,7 +266,7 @@ describe("wire loss", () => {
     await new Promise((r) => setTimeout(r, 10));
     const turnsBefore = s.stats.turns;
     w.closeCb?.(1011);
-    s.audio.push(new Uint8Array(2)); // input arrives while the redial is pending
+    s.emitAudio(toB64(new Uint8Array(2))); // input arrives while the redial is pending
     await new Promise((r) => setTimeout(r, 400)); // > one 250 ms run-loop wake
     expect(s.stats.turns).toBe(turnsBefore);
     await s.close();
@@ -298,7 +299,7 @@ describe("wire loss", () => {
     const { s, w } = await connected();
     const it = s.run()[Symbol.asyncIterator]();
     void it.next(); // the run loop is live
-    s.audio.push(new Uint8Array(2)); // input since the (closed) turn
+    s.emitAudio(toB64(new Uint8Array(2))); // input since the (closed) turn
     await new Promise((r) => setTimeout(r, 10));
     const createsBefore = w.sent.filter((m) => (m as { type?: string }).type === "response.create").length;
     w.closeCb?.(1011); // death → immediate redial (the same fake wire returns)
@@ -348,7 +349,7 @@ describe("session_gone redial races", () => {
     });
     await s.connect();
     first.closeCb?.(1011);
-    s.audio.push(new Uint8Array([1, 2]));
+    s.emitAudio(toB64(new Uint8Array([1, 2])));
     release();
     await new Promise((r) => setTimeout(r, 5));
     const types = second.sent.map((m) => (m as { type: string }).type);
@@ -396,7 +397,7 @@ describe("session_gone (1011)", () => {
     const unhandled: unknown[] = [];
     const onUnhandled = (e: unknown) => unhandled.push(e);
     process.on("unhandledRejection", onUnhandled);
-    const it = s.waves()[Symbol.asyncIterator]();
+    const it = s.run()[Symbol.asyncIterator]();
     const next = it.next();
     first.closeCb?.(1011);
     expect((await next).done).toBe(true);

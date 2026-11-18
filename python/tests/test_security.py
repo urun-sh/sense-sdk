@@ -9,7 +9,7 @@ import json
 import aiohttp
 import pytest
 import sense._session as _session_module
-from sense import ProtocolError, Sense, Session
+from sense import ProtocolError, Question, QuestionKind, Sense, Session
 from sense._core import Context, Wave, WaveAssembler
 from sense._session import MAX_PENDING_AUDIO_CHUNKS, _http_session
 from sense._transport import (
@@ -32,9 +32,18 @@ GOOD = {
 
 def _session() -> Session:
     s = Session(api_key="k")
-    s.add_question("cheese", "noul", "?")
-    s.add_question("kind", "choice", "?", options=["brie", "feta"])
-    s.add_question("feel", "score", "?", levels=["lo", "hi"])
+    s.set_questions(
+        [
+            Question(name="cheese", kind=QuestionKind.NOUL, instructions="cheese?"),
+            Question(
+                name="kind",
+                kind=QuestionKind.CHOICE,
+                instructions="kind?",
+                criteria={"brie": "Soft white-rind cheese", "feta": "Crumbly brined cheese"},
+            ),
+            Question(name="feel", kind=QuestionKind.SCORE, instructions="feel?", criteria=["lo", "hi"]),
+        ]
+    )
     return s
 
 
@@ -222,7 +231,7 @@ def test_newline_less_stream_does_not_grow_the_line_buffer():
 def test_outbound_text_backlog_is_bounded():
     s = _session()
     for i in range(1000):
-        s.text.push(str(i), mode="event")
+        s._text_in.push(str(i), mode="event")
     assert len(s._text_out) == 256
 
 
@@ -237,7 +246,7 @@ def test_lookalike_loopback_hosts_are_not_trusted(host):
 def test_outbound_audio_backlog_is_bounded():
     s = _session()
     for _ in range(MAX_PENDING_AUDIO_CHUNKS + 100):
-        s.audio.push(b"\x00\x00")
+        s._audio_in.push(b"\x00\x00")
     assert len(s._audio["default"]) == MAX_PENDING_AUDIO_CHUNKS
 
 
@@ -289,8 +298,8 @@ def test_raising_predicate_does_not_end_the_session():
     s = _session()
     kind = s.questions[1]
     fired = []
-    s.when(kind.p("missing-option") > 0.5, lambda ctx: None)
-    s.onWave(lambda ctx: fired.append(1))
+    s._ctx.when(kind.p("missing-option") > 0.5, lambda ctx: None)
+    s._on_wave(lambda ctx: fired.append(1))
     waves = asyncio.run(_drive(s, _wave_lines()))
     assert len(waves) == 1
     assert fired == [1]

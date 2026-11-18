@@ -116,13 +116,15 @@ function recordingTarget(): RecordingTarget {
   const pushedVideo: (Uint8Array | ArrayBuffer)[] = [];
   return {
     hz: 12.5,
-    audio: {
-      push: (pcm) => pushedAudio.push(pcm instanceof Uint8Array ? pcm : new Uint8Array(pcm)),
+    emitAudio: (b64: string) => {
+      pushedAudio.push(new Uint8Array(Buffer.from(b64, "base64")));
     },
-    video: { push: (jpeg) => pushedVideo.push(jpeg) },
+    emitVideo: (jpeg: Uint8Array | ArrayBuffer) => {
+      pushedVideo.push(jpeg instanceof Uint8Array ? jpeg : new Uint8Array(jpeg));
+    },
     pushedAudio,
     pushedVideo,
-  };
+  } as RecordingTarget;
 }
 
 /** Attach with the real worklet source flowing through the fake graph. */
@@ -159,7 +161,7 @@ describe("session.attach", () => {
     const expected = floatToPcm16(Float32Array.from(samples.slice(0, PCM_CHUNK_SAMPLES)));
     expect(Array.from(new Int16Array(frame.buffer, frame.byteOffset, 960))).toEqual(Array.from(expected));
 
-    handle.stop();
+    handle.detach();
   });
 
   test("worklet output matches PcmFramer on arbitrary chunk sizes", async () => {
@@ -182,18 +184,18 @@ describe("session.attach", () => {
       fed += size;
     }
     expect(target.pushedAudio.length).toBe(Math.floor(fed / PCM_CHUNK_SAMPLES));
-    handle.stop();
+    handle.detach();
   });
 
   test("stop() closes the context and drops later audio", async () => {
     const target = recordingTarget();
     const { handle, node, wasClosed } = await attachAudio(target);
     expect(wasClosed()).toBe(false);
-    handle.stop();
+    handle.detach();
     expect(wasClosed()).toBe(true);
     node.proc.process([[Float32Array.from({ length: 960 }, () => 0.5)]]);
     expect(target.pushedAudio.length).toBe(0);
-    handle.stop(); // idempotent
+    handle.detach(); // idempotent
   });
 });
 
@@ -247,7 +249,7 @@ describe("session.attach video & guards", () => {
         expect(target.pushedVideo.length).toBeGreaterThanOrEqual(3);
         expect(target.pushedVideo[0]!.byteLength).toBe(1_000);
         expect(qualities).toContain(0.35); // ladder stepped down to fit
-        handle.stop();
+        handle.detach();
         const at = target.pushedVideo.length;
         await vi.advanceTimersByTime(200);
         await flushMicrotasks();
@@ -261,12 +263,12 @@ describe("session.attach video & guards", () => {
     }
   });
 
-  test("without a browser, the error points at session.audio.push", async () => {
+  test("without a browser, the error points at session.attach({ audio: chunks })", async () => {
     const g = globalThis as { AudioContext?: unknown };
     const prev = g.AudioContext;
     delete g.AudioContext;
     try {
-      await expect(attachStream(recordingTarget(), audioOnly)).rejects.toThrow(/browser[\s\S]*session\.audio\.push/);
+      await expect(attachStream(recordingTarget(), audioOnly)).rejects.toThrow(/browser[\s\S]*session\.attach\(\{ audio: chunks \}\)/);
     } finally {
       g.AudioContext = prev;
     }

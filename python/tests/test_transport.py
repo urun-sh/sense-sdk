@@ -12,7 +12,7 @@ import sys
 import types
 
 import pytest
-from sense import QuestionKind, Session
+from sense import Question, QuestionKind, Session
 from sense._transport import (
     WT_CONTROL_FRAME_MAX,
     QuicWire,
@@ -83,8 +83,17 @@ def scripted_wave_events():
 def make_session(**kw) -> Session:
     """A test session with the finished and intent questions already added."""
     s = Session(api_key="sk-test", base_url="http://127.0.0.1:1", **kw)
-    s.add_question("finished", QuestionKind.NOUL, prompt="finished?")
-    s.add_question("intent", QuestionKind.CHOICE, prompt="want?", options=["support", "other"])
+    s.set_questions(
+        [
+            Question(name="finished", kind=QuestionKind.NOUL, instructions="finished?"),
+            Question(
+                name="intent",
+                kind=QuestionKind.CHOICE,
+                instructions="want?",
+                criteria={"support": "Technical help", "other": "Anything else"},
+            ),
+        ]
+    )
     return s
 
 

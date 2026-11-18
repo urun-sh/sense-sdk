@@ -56,24 +56,35 @@ class QuestionKind(str, Enum):
     SCORE = "score"
 
 
-def _option_names(options: Any) -> list[str]:
-    if options is None:
-        return []
-    if isinstance(options, Mapping):
-        # Jev-style name -> description map: the keys are the option names,
-        # insertion order preserved.
-        return [str(k) for k in options]
-    names = []
-    for opt in options:
-        if isinstance(opt, str):
-            names.append(opt)
-        elif isinstance(opt, dict):
-            names.append(str(opt["name"]))
-        elif isinstance(opt, (list, tuple)):
-            names.append(str(opt[0]))
-        else:
-            names.append(str(opt))
-    return names
+def _descriptions(criteria: Any, what: str) -> dict[str, str]:
+    """A Jev-style name -> description criteria map: string keys, every
+    description a non-empty string (the owner's rule — options without
+    descriptions are not acceptable in 0.2.0)."""
+    if not isinstance(criteria, Mapping) or not criteria:
+        raise ValueError(f"{what} criteria must be a non-empty name -> description map")
+    out = {}
+    for k, v in criteria.items():
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"{what} option {k!r} needs a non-empty description")
+        out[str(k)] = v
+    return out
+
+
+def _level_descriptions(criteria: Any, what: str) -> list[str]:
+    """Jev's score shape: an ORDERED array of level descriptions, low end
+    first (docs.typesafe.ai/primitives/score.md), 2..10 entries."""
+    if not isinstance(criteria, (list, tuple)):
+        raise ValueError(
+            f"{what} criteria must be an ordered array of level descriptions (low end first)"
+        )
+    if not 2 <= len(criteria) <= 10:
+        raise ValueError(f"{what} needs 2..10 score levels, got {len(criteria)}")
+    out = []
+    for d in criteria:
+        if not isinstance(d, str) or not d.strip():
+            raise ValueError(f"{what} level needs a non-empty description, got {d!r}")
+        out.append(d)
+    return out
 
 
 class _Accessor:
@@ -127,31 +138,63 @@ class _Accessor:
 
 @dataclass(eq=False)
 class Question:
-    """A registered Sense question. Comparison operators and the ``p``/``top``/
-    ``value``/``p_at_least`` accessors build :class:`Predicate` trees.
+    """A registered Sense question — exactly Jev's (TypeSafe System One)
+    shape: a NAME (the answer key), the natural-language ``instructions``,
+    and ``criteria`` per kind.
+
+    Comparison operators and the ``p``/``top``/``value``/``p_at_least``
+    accessors build :class:`Predicate` trees.
 
     Score comparison rule (on the bare question subject): ``eq``/``ne``
-    compare the TOP LEVEL NAME (argmax), ``gt``/``gte``/``lt``/``lte``
-    compare the EXPECTED ORDINAL — ``urgency >= 2`` thresholds the ordinal,
-    ``urgency == "high"`` matches the argmax level."""
+    compare the TOP LEVEL (argmax — the level's description text as the
+    model echoes it), ``gt``/``gte``/``lt``/``lte`` compare the EXPECTED
+    ORDINAL — ``urgency >= 2`` thresholds the ordinal."""
 
-    id: str
+    name: str
     kind: QuestionKind
-    prompt: str = ""
-    options: Any = None
-    levels: Any = None
+    instructions: str = ""
+    #: noul: optional ``{"true": desc, "false": desc}``; choice: the
+    #: name -> description map; score: the ordered array of level
+    #: descriptions (low end first) — Jev's shapes, nothing else.
+    criteria: Any = None
 
     def __post_init__(self) -> None:
         self.kind = QuestionKind(self.kind)
-        if self.kind is QuestionKind.SCORE:
-            n = len(list(self.levels or []))
-            if not 2 <= n <= 10:
-                raise ValueError(f"score question {self.id!r} needs 2..10 levels, got {n}")
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("question name must be a non-empty string")
+        if not isinstance(self.instructions, str) or not self.instructions.strip():
+            raise ValueError(f"question {self.name!r} needs non-empty instructions")
+        self.criteria = self._validate_criteria()
+
+    def _validate_criteria(self) -> Any:
+        if self.kind is QuestionKind.NOUL:
+            if self.criteria is None:
+                return None
+            d = _descriptions(self.criteria, f"noul question {self.name!r}")
+            bad = set(d) - {"true", "false"}
+            if bad or not d:
+                raise ValueError(
+                    f"noul question {self.name!r} criteria keys must be 'true'/'false', got {sorted(d)}"
+                )
+            return d
+        if self.kind is QuestionKind.CHOICE:
+            return _descriptions(self.criteria, f"choice question {self.name!r}")
+        return _level_descriptions(self.criteria, f"score question {self.name!r}")
+
+    #: The labels decisions are keyed by: option names for a choice,
+    #: true/false for a noul, the level descriptions for a score.
+    @property
+    def option_names(self) -> list[str]:
+        if self.kind is QuestionKind.NOUL:
+            return ["true", "false"]
+        if self.kind is QuestionKind.CHOICE:
+            return list(self.criteria)
+        return list(self.criteria)
 
     # -- predicate sugar ---------------------------------------------------
     @property
     def subject(self) -> tuple:
-        return ("q", self.id, None)
+        return ("q", self.name, None)
 
     def _cmp(self, op: str, other: Any) -> Predicate:
         return Predicate(op, self.subject, other)
@@ -177,18 +220,18 @@ class Question:
     #: P(true) for noul; call ``q.p("option")`` for a choice option.
     @property
     def p(self) -> _Accessor:
-        return _Accessor(("p", self.id, None))
+        return _Accessor(("p", self.name, None))
 
     @property
     def top(self) -> _Accessor:
-        return _Accessor(("top", self.id, None))
+        return _Accessor(("top", self.name, None))
 
     @property
     def value(self) -> _Accessor:
-        return _Accessor(("value", self.id, None))
+        return _Accessor(("value", self.name, None))
 
     def p_at_least(self, level: Any) -> _Accessor:
-        return _Accessor(("p_at_least", self.id, level))
+        return _Accessor(("p_at_least", self.name, level))
 
     def _truthy(self) -> Predicate:
         return Predicate(self.subject)
@@ -227,62 +270,18 @@ class Question:
         return Predicate.any_of(self._truthy(), _as_predicate(other))
 
     def __hash__(self) -> int:
-        return hash(self.id)
+        return hash(self.name)
 
     def __repr__(self) -> str:
-        return f"Question({self.id!r}, {self.kind.value!r})"
+        return f"Question({self.name!r}, {self.kind.value!r})"
 
     # -- wire shape --------------------------------------------------------
     def to_envelope(self) -> dict[str, Any]:
-        """The instructions-envelope entry for this question (protocol.md §2)."""
-        entry: dict[str, Any] = {"kind": self.kind.value, "prompt": self.prompt}
-        if self.kind is QuestionKind.NOUL:
-            if self.options is not None:
-                # A Jev-style name -> description map feeds the same pair
-                # form; descriptions ride the pairs the lane parses.
-                opts = (
-                    list(self.options.items())
-                    if isinstance(self.options, Mapping)
-                    else list(self.options)
-                )
-                if opts and all(isinstance(o, (list, tuple)) for o in opts):
-                    pairs = [[str(o[0]), str(o[1])] for o in opts]
-                else:
-                    pairs = [[n, ""] for n in _option_names(opts)]
-                # protocol §2 documents [no, yes] order: the first option is
-                # the false arm. Canonicalize a reversed [yes, no] pair.
-                if len(pairs) == 2 and [p[0].strip().lower() for p in pairs] == ["yes", "no"]:
-                    pairs.reverse()
-                entry["options"] = pairs
-        elif self.kind is QuestionKind.CHOICE:
-            if isinstance(self.options, Mapping):
-                # Canonical TypeSafe wire: criteria as a name -> description
-                # map (insertion order preserved).
-                entry["criteria"] = {str(k): str(v) for k, v in self.options.items()}
-            else:
-                names = _option_names(self.options or [])
-                entry["options"] = [
-                    o if isinstance(o, dict) else {"name": n, "description": ""}
-                    for o, n in zip(self.options or [], names, strict=True)
-                ]
-        else:  # score
-            if isinstance(self.levels, Mapping):
-                # A name -> description map; insertion order is the ordinal
-                # order the lane reads.
-                if not 2 <= len(self.levels) <= 10:
-                    raise ValueError(
-                        f"score question {self.id!r} needs 2..10 levels, got {len(self.levels)}"
-                    )
-                entry["criteria"] = {str(k): str(v) for k, v in self.levels.items()}
-                return entry
-            # Send an ordered array so the server uses the registered score
-            # levels rather than interpreting a string as free text.
-            levels = list(self.levels or [])
-            if not 2 <= len(levels) <= 10:
-                raise ValueError(
-                    f"score question {self.id!r} needs 2..10 levels, got {len(levels)}"
-                )
-            entry["criteria"] = levels
+        """The instructions-envelope entry for this question (protocol.md §2):
+        exactly Jev's keys — ``type``, ``instructions``, ``criteria``."""
+        entry: dict[str, Any] = {"type": self.kind.value, "instructions": self.instructions}
+        if self.kind is not QuestionKind.NOUL or self.criteria is not None:
+            entry["criteria"] = self.criteria
         return entry
 
 
@@ -334,11 +333,17 @@ class Result:
             raise ProtocolError(f"no probability for option {name!r} in wave {self.wave_id}")
         return self.distribution[name]
 
-    def p_at_least(self, level: str) -> float:
+    def p_at_least(self, level: str | int) -> float:
         if not self._levels:
             raise ProtocolError(f"question kind {self.kind.value!r} has no ordered levels")
-        idx = self._levels.index(level) if level in self._levels else -1
-        if idx < 0:
+        # A level is its zero-based index or its exact description text.
+        if isinstance(level, int) and not isinstance(level, bool):
+            idx = level
+        elif isinstance(level, str) and level in self._levels:
+            idx = self._levels.index(level)
+        else:
+            idx = -1
+        if not 0 <= idx < len(self._levels):
             raise ProtocolError(f"unknown level {level!r}; levels are {self._levels}")
         dist = self.distribution or {}
         return sum(dist.get(lvl, 0.0) for lvl in self._levels[idx:])
@@ -424,7 +429,7 @@ class _Answer:
 
 
 def _result_from(q: Question, ans: Mapping[str, Any], wave_id: int) -> Result:
-    a = _Answer.from_wire(ans, wave_id, q.id)
+    a = _Answer.from_wire(ans, wave_id, q.name)
     if q.kind is QuestionKind.NOUL:
         return _result_noul(q, ans, wave_id, a)
     if q.kind is QuestionKind.CHOICE:
@@ -435,13 +440,13 @@ def _result_from(q: Question, ans: Mapping[str, Any], wave_id: int) -> Result:
 def _result_noul(q: Question, ans: Mapping[str, Any], wave_id: int, a: _Answer) -> Result:
     val = _normalize_bool(a.choice)
     for k, v in a.probs.items():  # every entry, not just P(true) (TS parity)
-        _prob(v, f"wave {wave_id}: P({k!r}) for {q.id!r}")
+        _prob(v, f"wave {wave_id}: P({k!r}) for {q.name!r}")
     p = a.probs.get("true")
     if p is None:
         p = ans.get("noul")
     if p is None:
-        raise ProtocolError(f"wave {wave_id}: noul answer for {q.id!r} has no P(true)")
-    p = _prob(p, f"wave {wave_id}: P(true) for {q.id!r}")
+        raise ProtocolError(f"wave {wave_id}: noul answer for {q.name!r} has no P(true)")
+    p = _prob(p, f"wave {wave_id}: P(true) for {q.name!r}")
     return Result(
         wave_id=wave_id,
         kind=q.kind,
@@ -456,16 +461,16 @@ def _result_noul(q: Question, ans: Mapping[str, Any], wave_id: int, a: _Answer) 
 def _result_choice(q: Question, wave_id: int, a: _Answer) -> Result:
     if not isinstance(a.choice, str):
         raise ProtocolError(
-            f"wave {wave_id}: choice answer for {q.id!r} is not a label: {a.choice!r}"
+            f"wave {wave_id}: choice answer for {q.name!r} is not a label: {a.choice!r}"
         )
-    options = _option_names(q.options)
+    options = q.option_names
     if options and a.choice not in options:
         # Only registered labels are valid answers: an unregistered label
         # would otherwise flow into application logic and UI unchecked.
         raise ProtocolError(
-            f"wave {wave_id}: choice answer for {q.id!r} is not a registered option: {a.choice!r}"
+            f"wave {wave_id}: choice answer for {q.name!r} is not a registered option: {a.choice!r}"
         )
-    dist = {str(k): _prob(v, f"wave {wave_id}: P({k!r}) for {q.id!r}") for k, v in a.probs.items()}
+    dist = {str(k): _prob(v, f"wave {wave_id}: P({k!r}) for {q.name!r}") for k, v in a.probs.items()}
     return Result(
         wave_id=wave_id,
         kind=q.kind,
@@ -480,13 +485,13 @@ def _result_choice(q: Question, wave_id: int, a: _Answer) -> Result:
 def _result_score(q: Question, ans: Mapping[str, Any], wave_id: int, a: _Answer) -> Score:
     # score: probabilities keyed by string level index; expected ordinal in
     # ``score`` (recomputed as Σ i·pᵢ when the server omits it).
-    levels = list(q.levels or [])
+    levels = list(q.criteria)
     if not levels:
-        raise ProtocolError(f"score question {q.id!r} has no registered levels")
+        raise ProtocolError(f"score question {q.name!r} has no registered levels")
     by_index = _score_by_index(q, wave_id, a.probs, levels)
     missing = [i for i in range(len(levels)) if i not in by_index]
     if missing:
-        raise ProtocolError(f"wave {wave_id}: score answer for {q.id!r} missing level(s) {missing}")
+        raise ProtocolError(f"wave {wave_id}: score answer for {q.name!r} missing level(s) {missing}")
     dist = {levels[i]: by_index[i] for i in range(len(levels))}
     value = ans.get("score")
     try:
@@ -531,9 +536,9 @@ def _score_by_index(
         idx = int(k)
         if idx < 0 or idx >= len(levels):
             raise ProtocolError(
-                f"wave {wave_id}: score level index {idx} out of range for {q.id!r}"
+                f"wave {wave_id}: score level index {idx} out of range for {q.name!r}"
             )
-        by_index[idx] = _prob(v, f"wave {wave_id}: score level {idx} for {q.id!r}")
+        by_index[idx] = _prob(v, f"wave {wave_id}: score level {idx} for {q.name!r}")
     return by_index
 
 
@@ -562,7 +567,7 @@ class Wave:
         return self._results
 
     def result(self, q: Question | str) -> Result:
-        qid = q.id if isinstance(q, Question) else str(q)
+        qid = q.name if isinstance(q, Question) else str(q)
         try:
             return self._results[qid]
         except KeyError:
@@ -581,7 +586,7 @@ class Wave:
             qs = list(questions.values())
         else:
             qs = list(questions)
-        qmap = {q.id: q for q in qs}
+        qmap = {q.name: q for q in qs}
         raw = payload.get("results") or {}
         if not isinstance(raw, Mapping):
             raise ProtocolError(f"wave {payload.get('wave_id')}: results is not an object")
@@ -590,7 +595,7 @@ class Wave:
             raise ProtocolError(
                 f"wave {payload.get('wave_id')}: unknown question result(s): {unknown}"
             )
-        missing = [q.id for q in qs if q.id not in raw]
+        missing = [q.name for q in qs if q.name not in raw]
         if missing:
             raise ProtocolError(f"wave {payload.get('wave_id')}: missing answer(s) for {missing}")
         try:
@@ -600,7 +605,7 @@ class Wave:
             raise ProtocolError(
                 f"wave payload needs integer wave_id and t_ms: {dict(payload)!r}"
             ) from None
-        results = {q.id: _result_from(q, raw[q.id], wave_id) for q in qs}
+        results = {q.name: _result_from(q, raw[q.name], wave_id) for q in qs}
         # Use "default" when the server omits the optional source label.
         return cls(wave_id, t_ms, results, source=str(payload.get("source") or "default"))
 
@@ -790,7 +795,7 @@ class WaveAssembler:
 
     def __init__(self, questions: Iterable[Question], wave_id_start: int = 0) -> None:
         self.questions = list(questions)
-        self.qids = [q.id for q in self.questions]
+        self.qids = [q.name for q in self.questions]
         self.next_wave_id = wave_id_start
         self.on_decision: Callable[[], None] | None = None
         self._acc: dict[str, dict[str, Any]] = {}
@@ -857,8 +862,8 @@ class WaveAssembler:
             t_ms = 0
         results = {}
         for q in self.questions:
-            ev = acc[q.id]
-            results[q.id] = {
+            ev = acc[q.name]
+            results[q.name] = {
                 "kind": q.kind.value,
                 "choice": ev.get("choice"),
                 # Pass the raw value: from_wire maps absent/null to {} and
@@ -867,7 +872,7 @@ class WaveAssembler:
                 "confidence": ev.get("confidence"),
             }
             if ev.get("score") is not None:
-                results[q.id]["score"] = ev["score"]
+                results[q.name]["score"] = ev["score"]
         return Wave.decode(self.questions, {"wave_id": wave_id, "t_ms": t_ms, "results": results})
 
 
@@ -910,7 +915,7 @@ class Context:
         self.wave: Wave | None = None
         self._waves: list[Wave] = []
         self._whens: list[dict] = []
-        self._onwave: list[Callable[[Context], None]] = []
+        self._on_wave: list[Callable[[Context], None]] = []
         self._tasks: dict[str, asyncio.Task] = {}
         self._on_cancels: dict[str, Callable[[], None]] = {}
         self._signals: dict[str, asyncio.Event] = {}
@@ -946,7 +951,7 @@ class Context:
             if now and not entry["was_on"]:
                 self._fire(entry["handler"])
             entry["was_on"] = now
-        for handler, src in list(self._onwave):
+        for handler, src in list(self._on_wave):
             if src is not None and src != wave.source:
                 continue
             self._fire(handler)
@@ -996,8 +1001,8 @@ class Context:
         self._whens.append(entry)
         return WhenHandle(self, entry)
 
-    def onWave(self, handler: Callable[[Context], None], *, source: str | None = None) -> None:
-        self._onwave.append((handler, source))
+    def on_wave(self, handler: Callable[[Context], None], *, source: str | None = None) -> None:
+        self._on_wave.append((handler, source))
 
     def get(self, question: Question | str, *, source: str | None = None) -> Result | None:
         w = self.latest(source)

@@ -1,82 +1,141 @@
-/** Questions and the instructions envelope (protocol §2). */
+/** Questions and the instructions envelope (protocol §2).
+ *
+ * One question shape everywhere — Jev's (TypeSafe System One):
+ * `{ type, instructions, criteria }` on the wire; `{ instructions, criteria }`
+ * in the app. The question NAME is the answer key; there is no separate id and
+ * no auto-slugging. */
 import { opsFor } from "./predicate.ts";
 import type { Predicate } from "./predicate.ts";
 
 export type QuestionKind = "noul" | "choice" | "score";
 
-export interface QuestionInit {
-  id: string;
-  kind: QuestionKind;
-  prompt?: string;
-  /** choice option names, or a name -> description map (Jev-style criteria;
-   * insertion order is the wire order). */
-  options?: string[] | Record<string, string>;
-  /** score level names (ordinal order), or a name -> description map. */
-  levels?: string[] | Record<string, string>;
+/** noul criteria: an optional {true, false} description pair. */
+export interface NoulCriteria {
+  true: string;
+  false: string;
 }
 
-/** Names + descriptions from either option form: an array of names, or a
- * Jev-style name -> description map (keys are the names, insertion order
- * preserved). */
-function optionParts(
-  v: string[] | Record<string, string> | undefined,
-): { names?: string[]; descriptions?: Record<string, string> } {
-  if (v === undefined) return {};
-  if (Array.isArray(v)) return { names: v };
-  return { names: Object.keys(v), descriptions: v };
+/** choice criteria: option name -> description (insertion order is the wire
+ * order; every description must be non-empty). */
+export type ChoiceCriteria = Record<string, string>;
+
+/** score criteria: an ORDERED array of level descriptions, low end first
+ * (2..10 entries). The list IS Jev's shape for scores. */
+export type ScoreCriteria = string[];
+
+export interface QuestionInit {
+  /** The answer key on every wave. */
+  name: string;
+  kind: QuestionKind;
+  /** What the model should answer; non-empty when given. */
+  instructions?: string;
+  /** noul: optional {true,false} map; choice: name -> description map;
+   * score: ordered array of level descriptions (low end first). */
+  criteria?: NoulCriteria | ChoiceCriteria | ScoreCriteria;
+}
+
+/** Validated criteria for one kind: option/level names for decode-time
+ * validation, plus the description map (choice/noul) kept for the envelope. */
+function parseCriteria(
+  kind: QuestionKind,
+  name: string,
+  criteria: QuestionInit["criteria"],
+): { options?: string[]; levels?: string[]; descriptions?: Record<string, string> } {
+  if (kind === "score") return scoreCriteria(name, criteria);
+  if (kind === "noul") return noulCriteria(name, criteria);
+  return choiceCriteria(name, criteria);
+}
+
+function scoreCriteria(name: string, criteria: QuestionInit["criteria"]): { levels: string[] } {
+  if (!Array.isArray(criteria) || criteria.length < 2 || criteria.length > 10 ||
+    criteria.some((d) => typeof d !== "string" || d.trim() === "")) {
+    throw new RangeError(`score question "${name}" needs 2..10 non-empty level descriptions (low end first)`);
+  }
+  return { levels: criteria };
+}
+
+function noulCriteria(name: string, criteria: QuestionInit["criteria"]): { options: string[]; descriptions: Record<string, string> } | {} {
+  if (criteria === undefined) return {};
+  const c = criteria as NoulCriteria;
+  if (typeof c !== "object" || Array.isArray(c) || Object.keys(c).sort().join() !== "false,true" ||
+    [c.true, c.false].some((d) => typeof d !== "string" || d.trim() === "")) {
+    throw new Error(`noul question "${name}" criteria must be a {true, false} description map with non-empty descriptions`);
+  }
+  return { descriptions: { true: c.true, false: c.false }, options: ["true", "false"] };
+}
+
+function choiceCriteria(name: string, criteria: QuestionInit["criteria"]): { options: string[]; descriptions: Record<string, string> } {
+  const c = criteria as ChoiceCriteria;
+  if (typeof c !== "object" || Array.isArray(c) || Object.keys(c).length === 0) {
+    throw new Error(`choice question "${name}" needs a non-empty criteria map (name -> description)`);
+  }
+  for (const [k, d] of Object.entries(c)) {
+    if (typeof d !== "string" || d.trim() === "") {
+      throw new Error(`choice question "${name}" needs a non-empty description for option "${k}"`);
+    }
+  }
+  return { descriptions: c, options: Object.keys(c) };
 }
 
 /** One registered question. */
 export class Question {
-  readonly id: string;
+  /** The answer key: `wave.result(name)`, `q.top.eq(...)`, predicates. */
+  readonly name: string;
   readonly kind: QuestionKind;
-  readonly prompt?: string;
-  /** option/level NAMES (a map form is flattened; descriptions live in
-   * `descriptions`), so predicates and wave validation keep working. */
+  readonly instructions?: string;
+  /** choice/noul option NAMES (keys of the criteria map), so predicates and
+   * wave validation keep working. */
   readonly options?: string[];
+  /** score level DESCRIPTIONS, ordinal order (low end first). The server
+   * echoes the description back as the score's choice. */
   readonly levels?: string[];
-  /** name -> description when registered as a map (Jev-style criteria). */
+  /** choice/noul criteria: name -> description. */
   readonly descriptions?: Record<string, string>;
 
   constructor(init: QuestionInit) {
-    this.id = init.id;
-    this.kind = init.kind;
-    this.prompt = init.prompt;
-    const opt = optionParts(init.options);
-    const lvl = optionParts(init.levels);
-    this.options = opt.names;
-    this.levels = lvl.names;
-    this.descriptions = opt.descriptions ?? lvl.descriptions;
-    if (init.kind === "score" && (lvl.names?.length ?? 0) < 2) {
-      throw new RangeError(`score question "${init.id}" needs 2..10 levels`);
+    if (typeof init.name !== "string" || init.name.trim() === "") {
+      throw new Error("question name must be a non-empty string");
     }
+    this.name = init.name;
+    this.kind = init.kind;
+    if (init.instructions !== undefined) {
+      if (typeof init.instructions !== "string" || init.instructions.trim() === "") {
+        throw new Error(`instructions for question "${init.name}" must be a non-empty string`);
+      }
+      this.instructions = init.instructions;
+    }
+    const parsed = parseCriteria(init.kind, init.name, init.criteria);
+    this.options = parsed.options;
+    this.levels = parsed.levels;
+    this.descriptions = parsed.descriptions;
   }
 
   /** argmax accessor: `actions.top.eq("respond")`. */
   get top() {
-    return opsFor({ type: "top", question: this.id });
+    return opsFor({ type: "top", question: this.name });
   }
 
   /** score expected-ordinal accessor. */
   get value() {
-    return opsFor({ type: "value", question: this.id });
+    return opsFor({ type: "value", question: this.name });
   }
 
   /** noul P(true) accessor; choice: `intent.p("support").gte(0.7)`. */
   get p() {
-    return opsFor({ type: "p", question: this.id });
+    return opsFor({ type: "p", question: this.name });
   }
 
-  /** score level-threshold accessor. */
-  pAtLeast(level: string) {
-    return opsFor({ type: "p_at_least", question: this.id, level });
+  /** score level-threshold accessor: a zero-based index or the exact level
+   * description. */
+  pAtLeast(level: number | string) {
+    return opsFor({ type: "p_at_least", question: this.name, level });
   }
 
   // Argmax sugar on the question itself: `intent.eq("support")` == the top
   // option equals "support"; `finished.eq(true)` / `finished.and(...)` /
   // `finished.not()` for noul. Same trees the accessors build.
   private argmax() {
-    return opsFor({ type: "question", id: this.id });
+    return opsFor({ type: "question", id: this.name });
   }
   eq(value: string | number | boolean) { return this.argmax().eq(value); }
   ne(value: string | number | boolean) { return this.argmax().ne(value); }
@@ -89,49 +148,20 @@ export class Question {
   not() { return this.argmax().truthy().not(); }
 }
 
-/** The §2 envelope entry for a score question: an ordered array so the
- * server uses the registered score levels rather than interpreting a string
- * as free text; a map keeps each level's description (insertion order is
- * the ordinal order). */
-function scoreEntry(q: Question): Record<string, unknown> {
-  return { kind: q.kind, prompt: q.prompt ?? "", criteria: q.descriptions ?? q.levels ?? [] };
-}
-
-/** The §2 envelope entry for a noul question with descriptions: the
- * documented pair form `[name, description]`, canonicalized to no-first
- * (the first option is the false arm — same rule the python facade
- * applies). */
-function noulEntry(q: Question): Record<string, unknown> {
-  const pairs = (q.options ?? []).map((n): [string, string] => [n, q.descriptions?.[n] ?? ""]);
-  const [first, second] = pairs;
-  if (
-    pairs.length === 2 && first && second &&
-    first[0].toLowerCase() === "yes" && second[0].toLowerCase() === "no"
-  ) {
-    pairs.reverse();
-  }
-  return { kind: q.kind, prompt: q.prompt ?? "", options: pairs };
-}
-
-/** The §2 envelope entry for a choice question: a criteria map when the
- * question carries descriptions (canonical TypeSafe wire), else the bare
- * option-name list. */
-function choiceEntry(q: Question): Record<string, unknown> {
-  if (q.descriptions) return { kind: q.kind, prompt: q.prompt ?? "", criteria: q.descriptions };
-  return { kind: q.kind, prompt: q.prompt ?? "", ...(q.options ? { options: q.options } : {}) };
-}
-
-/** The §2 instructions envelope body (values, not the JSON string). */
+/** The §2 instructions envelope body (values, not the JSON string). Only
+ * Jev's keys go on the wire: `type`, `instructions`, `criteria` — noul omits
+ * `criteria` when not given, choice sends the name -> description map, score
+ * sends the ordered description array. */
 export function instructionsEnvelope(
   questions: readonly Question[],
   hz: number,
 ): { questions: Record<string, Record<string, unknown>>; hz: number } {
   const out: Record<string, Record<string, unknown>> = {};
   for (const q of questions) {
-    out[q.id] =
-      q.kind === "score" ? scoreEntry(q)
-      : q.descriptions ? (q.kind === "noul" ? noulEntry(q) : choiceEntry(q))
-      : choiceEntry(q);
+    const entry: Record<string, unknown> = { type: q.kind, instructions: q.instructions ?? "" };
+    if (q.kind === "score") entry.criteria = q.levels;
+    else if (q.descriptions) entry.criteria = q.descriptions;
+    out[q.name] = entry;
   }
   return { questions: out, hz };
 }

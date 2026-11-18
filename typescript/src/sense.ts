@@ -1,28 +1,12 @@
 /** Sense: the app facade — register questions, compose predicates, open sessions. */
 import { Question } from "./question.ts";
-import type { QuestionKind } from "./question.ts";
+import type { ChoiceCriteria, NoulCriteria, QuestionInit, ScoreCriteria } from "./question.ts";
 import type { Predicate } from "./predicate.ts";
 import type { WaveHandler } from "./context.ts";
 import { Session, envVar, type ApiKeyProvider, type SessionOptions } from "./session.ts";
 import { checkBaseUrl, type Transport } from "./transport.ts";
 
 export interface SenseOptions extends SessionOptions {}
-
-/** Mirror of python `_slug`: lowercase, each non-alphanumeric char becomes
- * `_`, leading/trailing `_` trimmed, never empty, unique within the app. */
-function slug(text: string, taken: Iterable<string>): string {
-  let base = "";
-  for (const c of text.trim().toLowerCase()) base += /\p{L}|\p{N}/u.test(c) ? c : "_";
-  base = base.replace(/^_+/, "").replace(/_+$/, "") || "question";
-  const takenSet = new Set(taken);
-  let qid = base;
-  let n = 1;
-  while (takenSet.has(qid)) {
-    n += 1;
-    qid = `${base}_${n}`;
-  }
-  return qid;
-}
 
 export class Sense {
   readonly apiKey?: ApiKeyProvider;
@@ -47,42 +31,28 @@ export class Sense {
     if (this.baseUrl !== undefined) checkBaseUrl(this.baseUrl, this.allowInsecure);
   }
 
-  /** Register a binary question. TEXT-FIRST like the python facade: the
-   * natural-language question is the first argument; the id is optional and
-   * auto-slugged from the question text (options optional; the server
-   * defaults to true/false). */
-  noul(question: string, opts: { id?: string; options?: string[] | Record<string, string> } = {}): Question {
-    return this.register({ id: this.qid(question, opts.id), kind: "noul", prompt: question, options: opts.options });
+  /** Register a binary question. The NAME is the first positional argument —
+   * it is the answer key on every wave. Criteria (the {true, false}
+   * description pair) is optional; the server defaults to true/false. */
+  noul(name: string, opts: { instructions: string; criteria?: NoulCriteria }): Question {
+    return this.register({ name, kind: "noul", instructions: opts.instructions, criteria: opts.criteria });
   }
 
-  /** Register an n-way choice question (text-first; id auto-slugs). Options
-   * are names, or a name -> description map (Jev-style criteria). */
-  choice(question: string, options: string[] | Record<string, string>, opts: { id?: string } = {}): Question {
-    return this.register({ id: this.qid(question, opts.id), kind: "choice", prompt: question, options });
+  /** Register an n-way choice question. Criteria is the required
+   * name -> description map (Jev-style; insertion order is the wire order). */
+  choice(name: string, opts: { instructions: string; criteria: ChoiceCriteria }): Question {
+    return this.register({ name, kind: "choice", instructions: opts.instructions, criteria: opts.criteria });
   }
 
-  /** Register an ordinal score question, 2..10 levels (text-first; id
-   * auto-slugs). Levels are names (array order = ordinal), or a name ->
-   * description map (insertion order = ordinal). */
-  score(question: string, levels: string[] | Record<string, string>, opts: { id?: string } = {}): Question {
-    return this.register({ id: this.qid(question, opts.id), kind: "score", prompt: question, levels });
+  /** Register an ordinal score question, 2..10 levels. Criteria is the
+   * ordered array of level descriptions, low end first. */
+  score(name: string, opts: { instructions: string; criteria: ScoreCriteria }): Question {
+    return this.register({ name, kind: "score", instructions: opts.instructions, criteria: opts.criteria });
   }
 
-  /** Mirror of python `_qid`: the question text is required and non-empty;
-   * the id is auto-slugged from it when omitted and must be non-empty when
-   * given explicitly. */
-  private qid(question: string, id: string | undefined): string {
-    if (typeof question !== "string" || question.trim() === "") {
-      throw new Error("question text must be a non-empty string (text-first API)");
-    }
-    if (id === undefined) return slug(question, this.questions.map((q) => q.id));
-    if (id.trim() === "") throw new Error("explicit id must be non-empty");
-    return id;
-  }
-
-  private register(init: { id: string; kind: QuestionKind; prompt?: string; options?: string[] | Record<string, string>; levels?: string[] | Record<string, string> }): Question {
+  private register(init: QuestionInit): Question {
     const q = new Question(init);
-    const i = this.questions.findIndex((x) => x.id === q.id);
+    const i = this.questions.findIndex((x) => x.name === q.name);
     if (i >= 0) this.questions[i] = q;
     else this.questions.push(q);
     return q;
@@ -121,10 +91,10 @@ export class Sense {
       allowInsecure: this.allowInsecure,
       questions: this.questions,
     });
-    for (const { pred, handler } of this.whens) s.when(pred, handler);
-    for (const { handler, opts } of this.waveHandlers) s.onWave(handler, opts);
+    for (const { pred, handler } of this.whens) s.context.when(pred, handler);
+    for (const { handler, opts } of this.waveHandlers) s.context.onWave(handler, opts);
     return s;
   }
 }
 
-export type { QuestionKind };
+export type { QuestionKind } from "./question.ts";

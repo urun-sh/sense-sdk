@@ -138,7 +138,7 @@ export class Context {
     if (existing && !opts.replace) {
       return Promise.reject(new Error(`run "${key}" is already active`));
     }
-    if (existing) this.cancel(key);
+    if (existing) this.cancel(key, { bargeIn: false }); // an internal replace never barges in
     const controller = new AbortController();
     this.signal = controller.signal;
     const { promise: aborted, reject: rejectAbort } = Promise.withResolvers<never>();
@@ -154,9 +154,15 @@ export class Context {
     return done;
   }
 
-  /** Abort a keyed run (its signal + onCancel hook fire). */
-  cancel(key: string): void {
+  /** Cancel a keyed run (its signal + onCancel hook fire) and, by default,
+   * barge in — stop the active turn's cadence so the lane is free at once.
+   * Pass `{ bargeIn: false }` to cancel the run silently. */
+  cancel(key: string, opts: { bargeIn?: boolean } = {}): void {
     this.runs.get(key)?.controller.abort();
+    if (opts.bargeIn ?? true) {
+      const s = this.session as { bargeIn?(): void } | null | undefined;
+      s?.bargeIn?.();
+    }
   }
 
   /** Latest result for a question, or null before the first wave. */

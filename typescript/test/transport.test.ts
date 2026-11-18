@@ -241,8 +241,8 @@ describe("NdjsonSplitter", () => {
 
 describe("session over fake wire", () => {
   const questions = [
-    new Question({ id: "finished", kind: "noul", prompt: "finished?" }),
-    new Question({ id: "intent", kind: "choice", options: ["support", "other"] }),
+    new Question({ name: "finished", kind: "noul", instructions: "finished?" }),
+    new Question({ name: "intent", kind: "choice", instructions: "What does the person want?", criteria: { support: "Help with a problem", other: "Anything else" } }),
   ];
 
   test("quic wire yields the same waves as ws", async () => {
