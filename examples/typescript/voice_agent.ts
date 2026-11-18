@@ -56,7 +56,7 @@ app.when(
     const wave = event.latest()!;
     console.log(`[respond] wave ${wave.waveId} t=${wave.tMs}ms urgency=${(wave.result("urgency") as Score).value.toFixed(2)}`);
     // A tracked cancellable run: duplicate active keys reject; the barge-in
-    // watcher cancels it.
+    // watcher cancels it (ctx.cancel barges in by default).
     event
       .run("reply", (ctx) => reply(wave, ctx.signal), {
         onCancel: () => console.log("[respond] reply cancelled"),
@@ -125,8 +125,8 @@ async function bargeInWatch(): Promise<void> {
 
 // -- the session ---------------------------------------------------------------
 
-/** 24 kHz PCM16 mono audio frames, paced like a live mic (48 kHz decimated). */
-async function* audioFrames(path: string, chunkMs = 40): AsyncGenerator<{ audio: Uint8Array }> {
+/** 24 kHz PCM16 mono audio chunks, paced like a live mic (48 kHz decimated). */
+async function* audioFrames(path: string, chunkMs = 40): AsyncGenerator<Uint8Array> {
   const buf = readFileSync(path);
   // Minimal RIFF walk to the data chunk.
   let off = 12;
@@ -145,7 +145,7 @@ async function* audioFrames(path: string, chunkMs = 40): AsyncGenerator<{ audio:
   const decimated = rate === 48000 ? samples.filter((_, i) => i % 2 === 0) : samples;
   const n = Math.floor((24000 * chunkMs) / 1000);
   for (let i = 0; i + n <= decimated.length; i += n) {
-    yield { audio: new Uint8Array(decimated.buffer, decimated.byteOffset + i * 2, n * 2).slice() };
+    yield new Uint8Array(decimated.buffer, decimated.byteOffset + i * 2, n * 2).slice();
     await delay(chunkMs);
   }
 }
@@ -153,19 +153,29 @@ async function* audioFrames(path: string, chunkMs = 40): AsyncGenerator<{ audio:
 async function main(): Promise<number> {
   const path = process.argv[2] ?? fileURLToPath(new URL("./assets/mic-question-48k-mono.wav", import.meta.url));
   const session = app.session();
-  // Text input alongside the audio (e.g. a transcript from your own ASR): the model
-  // hears the audio directly; text is extra context and exercises session.text.
-  session.text.push("Hi — my internet has been down since this morning and I need help.");
   void bargeInWatch();
   // Demo bound: a live agent runs forever; the example stops after 30s.
   const done = Promise.withResolvers<void>();
   const timer = setTimeout(() => done.resolve(), 30_000);
   try {
-    const waves = session.run(audioFrames(path))[Symbol.asyncIterator]();
-    for (;;) {
-      const next = await Promise.race([waves.next(), done.promise.then(() => null)]);
-      if (next === null || next.done) break;
-      void next.value; // handlers react; the run loop assembles and yields waves
+    // attach() is the one input path: pump the WAV chunks (plus a text source
+    // standing in for a transcript from your own ASR — the model hears the
+    // audio directly; text is extra context), then read waves.
+    const attached = await session.attach({
+      audio: audioFrames(path),
+      text: (async function* () {
+        yield "Hi — my internet has been down since this morning and I need help.";
+      })(),
+    });
+    try {
+      const waves = session.run()[Symbol.asyncIterator]();
+      for (;;) {
+        const next = await Promise.race([waves.next(), done.promise.then(() => null)]);
+        if (next === null || next.done) break;
+        void next.value; // handlers react; the run loop assembles and yields waves
+      }
+    } finally {
+      attached.stop();
     }
   } finally {
     clearTimeout(timer);

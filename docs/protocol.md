@@ -272,16 +272,14 @@ Retry policies differ. Python retries transient WebSocket/network failures with 
 |---|---|
 | Create `Sense` / `Session` | Configure endpoint, model, credentials, cadence, and transport; registration is sent when connected |
 | `app.noul`, `app.choice`, `app.score` | Build Jev-shaped question entries (`type`/`instructions`/`criteria`) in the instructions envelope |
-| `session.audio.push` | Queue or send `input_audio_buffer.append` |
-| `session.video.push` | Queue or send `conversation.item.create` with `input_image` |
-| `session.text.push` | Update text to send as `input_text` |
+| `session.attach(...)` | The one canonical input path: pumps audio (`input_audio_buffer.append`), video (`conversation.item.create` with `input_image`), and text (`input_text`) from the attached sources |
 | `session.run()` | Connect/register, drive turns, assemble decisions, and yield waves |
 | `Wave` | Decoded complete answer set (§6) |
 | Predicates and handlers | Client-side evaluation; they do not suppress server questions |
 
-Python's `session.attach(audio=…, video=…, text=…)` pumps inputs concurrently with wave consumption. TypeScript's `session.attach(stream)` streams a live browser MediaStream, and `run(inputs)` consumes a finite iterable before entering its wave loop; for continuous media, use attach and wave consumption together as shown in the [README](../README.md).
+Python's `session.attach(audio=…, video=…, text=…)` pumps inputs concurrently with wave consumption. TypeScript's `session.attach(stream | sources)` streams a live browser MediaStream or programmatic sources the same way; `run()` dials on first read and is the wave loop in both. Audio pushed before the dial is buffered client-side and replayed onto the fresh wire before any turn opens. See the [README](../README.md).
 
-Python `Context.cancel()` normally also requests `response.cancel`; `barge_in=False` cancels only the tracked task. TypeScript `Context.cancel()` aborts the tracked run; `Session.bargeIn()` separately sends `response.cancel`.
+Python `Context.cancel()` normally also requests `response.cancel`; `barge_in=False` cancels only the tracked task. TypeScript `Context.cancel(key)` matches: it barges in by default and takes `{ bargeIn: false }` to cancel only the tracked run.
 
 ### 8.1 Named sources and limitations
 

@@ -235,9 +235,9 @@ async def main() -> None:
 
         session = app.session()
         raw, coalesced, when_fires = [], [], []
-        session.on_wave(lambda ctx: raw.append(ctx.latest()))
-        session.on_wave(lambda ctx: coalesced.append(ctx.latest()), coalesce=True)
-        session.when(
+        app.on_wave(lambda ctx: raw.append(ctx.latest()))
+        app.on_wave(lambda ctx: coalesced.append(ctx.latest()), coalesce=True)
+        app.when(
             finished & (intent == "support"),
             lambda ctx: when_fires.append(ctx.latest().wave_id),
         )

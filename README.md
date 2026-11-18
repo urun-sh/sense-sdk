@@ -167,7 +167,7 @@ if detection.p >= 0.6:
     mood_score = sentiment.value  # Expected index value
 ```
 
-**Close in the correct order.** Cancel your tasks and let them settle, then `waves.aclose()` and `await session.close()`:
+**Close in the correct order.** Cancel your tasks and let them settle, then `waves.aclose()` and `await session.close()` (closing the session also stops the attached pumps):
 ```python
 try:
     await asyncio.gather(*tasks)
@@ -228,13 +228,12 @@ const feeling = app.score("feeling", {
 });
 ```
 
-**Open a session and start reading waves:** `session.run()` connects to Sense (unless `connect()` already has), registers the questions,
+**Open a session and start reading waves:** `session.run()` connects to Sense, registers the questions,
 and yields `waves`. A wave is a batch of decisions taken over the last slice of audio:
 
 ```ts
 const session = app.session();
-await session.connect(); // dial before pushing audio — earlier chunks would be dropped
-const waves = session.run(); // returns async iterator
+const waves = session.run(); // returns async iterator; dials on first read
 
 async function readWaves(): Promise<void> {
     for await (const wave of waves) { // iterations can throw if Sense is unreachable
@@ -249,6 +248,15 @@ async function readWaves(): Promise<void> {
 const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true }); // audio-only streams work too
 const attached = await session.attach(stream); // resamples + pushes continuously; returns a handle with stop()
 // later: attached.stop() — stops the pumping; the stream's tracks stay yours to stop
+```
+
+**Programmatic sources (server/Node).** attach is the ONE input path: instead of a MediaStream, pass a sources object `{ audio?, video?, text? }` — each an async iterable, a sync iterable, or a zero-arg callable returning the next chunk (null ends it). Audio chunks are PCM16 24 kHz mono bytes, video chunks are JPEG bytes, text chunks are strings appended to the transcript:
+
+```ts
+const attached = await session.attach({
+    audio: micChunks(), // PCM16 mono 24 kHz, e.g. 40 ms blocks
+    text: ["Hi — my internet has been down since this morning."], // initial state rides the first turn
+});
 ```
 
 **Browser quickstart (no relay).** Your server keeps the org API key and mints a 10-minute client secret; the browser dials `inference.urun.sh` directly — the dial route (`POST /v1/realtime/calls`) is CORS-open for bearer auth, and the WebTransport/WebRTC media leg needs no relay. A runnable minting server is at [examples/typescript/mint_server.ts](https://github.com/urun-sh/sense-sdk/blob/main/examples/typescript/mint_server.ts):
@@ -269,25 +277,7 @@ const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: t
 const attached = await session.attach(stream); // the one-liner above, now unattended
 ```
 
-**Feed it audio concurrently.** The SDK currently speaks 24 kHz PCM16 mono in 40 ms chunks. The audio push and the wave consumption must run at the same time — a blocking wave loop starves the audio — so we run them as concurrent tasks:
-
-```ts
-async function sendAudio(chunks: AsyncGenerator<ArrayBuffer>, session: Session): Promise<void> {
-    for await (const chunk of chunks) {
-        session.audio.push(chunk); // PCM16, mono, 24 kHz; one 40 ms block
-    }
-    await session.close(); // audio ended — end the run loop so readWaves returns
-}
-
-const chunks = mic.chunks();
-const first = await chunks.next(); // the turn opens on the first pushed chunk — push one before the wave loop starts
-if (!first.done) session.audio.push(first.value);
-const tasks = [sendAudio(chunks, session), readWaves()];
-```
-
-`session.run()` can also take finite audio/video/text inputs and push them for you before reading waves; this example pushes audio manually to keep the mic and the level meter in step.
-
-**Read decisions off each wave.** Every answered question `id` has a `result` with a `.value`, and a confidence/probability `.p`. Additionally:
+**Read decisions off each wave.** Every answered question `name` has a `result` with a `.value`, and a confidence/probability `.p`. Additionally:
 - Choices return confidences for each option in `.pOption(name)`(normalized so they form a discrete probability distribution).
 - Scores return:
   - The argmax level in `.top` (the level's description, as the model echoes it)
@@ -309,14 +299,13 @@ if (detection.p >= 0.6) {
 }
 ```
 
-**Close in the correct order.** Stop the mic and close the session — `session.close()` ends the run loop, so the wave iteration above returns:
+**Close in the correct order.** Stop the attach handle (the pumps) and close the session — `session.close()` ends the run loop, so the wave iteration above returns:
 ```ts
 try {
-    await Promise.race(tasks); // first task to finish: mic end or wire death
+    await Promise.race([readWaves(), micEnded]); // first to finish: mic end or wire death
 } finally {
-    mic.stop(); // unblocks sendAudio when the wave reader ends first
+    attached.stop(); // stops the attach pumps; the stream's tracks stay yours to stop
     await session.close();
-    await Promise.all(tasks); // settle both even when the race threw; the race error propagates after
 }
 ```
 

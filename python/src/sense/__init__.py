@@ -4,9 +4,8 @@ Public surface: :class:`Sense` (facade), :class:`Session`, :class:`Question`,
 :class:`QuestionKind`, :class:`Predicate`, :class:`Wave`, :class:`Score`,
 :class:`Result`, :class:`Context`, :class:`ProtocolError`,
 :class:`OutOfCreditsError`, :class:`SenseUnavailable`, :func:`session_event`,
-the input handles :class:`AudioInput`, :class:`VideoInput`,
-:class:`TextInput` and :class:`AttachHandle` (streaming inputs go through
-``session.attach``). For clients that drive their own event loop over a
+the input handle :class:`AttachHandle` (streaming inputs go through
+``session.attach`` — the one canonical input path). For clients that drive their own event loop over a
 transport wire, the QUIC wire :class:`QuicWire` and
 :class:`TransportFailed` are public too.
 """
@@ -29,17 +28,13 @@ from ._core import (
 )
 from ._session import (
     AttachHandle,
-    AudioInput,
     SenseUnavailable,
     Session,
-    TextInput,
-    VideoInput,
 )
 from ._transport import QuicWire, TransportFailed
 
 __all__ = [
     "AttachHandle",
-    "AudioInput",
     "Context",
     "OutOfCreditsError",
     "Predicate",
@@ -53,9 +48,7 @@ __all__ = [
     "SenseUnavailable",
     "Session",
     "SessionEvent",
-    "TextInput",
     "TransportFailed",
-    "VideoInput",
     "Wave",
     "session_event",
 ]
@@ -135,10 +128,6 @@ class Sense:
             Question(name=name, kind=QuestionKind.SCORE, instructions=instructions, criteria=criteria)
         )
 
-    def predicate(self, fn: Callable) -> Predicate:
-        """Callable leaf: ``Predicate(fn)`` where ``fn(wave) -> bool``."""
-        return Predicate(fn)
-
     def when(
         self, pred: Predicate, handler: Callable | None = None, *, source: str | None = None
     ) -> Any:
@@ -152,11 +141,11 @@ class Sense:
         if handler is None:
 
             def deco(fn: Callable) -> Any:
-                self._s().when(pred, fn, source=source)
+                self._s()._ctx.when(pred, fn, source=source)
                 return fn
 
             return deco
-        return self._s().when(pred, handler, source=source)
+        return self._s()._ctx.when(pred, handler, source=source)
 
     def on_wave(
         self, handler: Callable | None = None, coalesce: bool = False, *, source: str | None = None
@@ -170,11 +159,11 @@ class Sense:
         if handler is None:
 
             def deco(fn: Callable) -> Any:
-                self._s().on_wave(fn, coalesce, source=source)
+                self._s()._on_wave(fn, coalesce, source=source)
                 return fn
 
             return deco
-        self._s().on_wave(handler, coalesce, source=source)
+        self._s()._on_wave(handler, coalesce, source=source)
         return handler
 
     def session(self) -> Session:

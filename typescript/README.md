@@ -91,13 +91,11 @@ const feeling = app.score("feeling", {
 });
 ```
 
-**Open a session and start reading waves:** `session.run()` connects to Sense (unless `connect()` already has), registers the questions,
-and yields `waves`. A wave is a batch of decisions taken over the last slice of audio:
+**Open a session and start reading waves:** `session.run()` dials on first read and yields `waves`. A wave is a batch of decisions taken over the last slice of audio:
 
 ```ts
 const session = app.session();
-await session.connect(); // dial before pushing audio — earlier chunks would be dropped
-const waves = session.run(); // returns async iterator
+const waves = session.run(); // returns an async iterator
 
 async function readWaves(): Promise<void> {
     for await (const wave of waves) { // iterations can throw if Sense is unreachable
@@ -106,7 +104,7 @@ async function readWaves(): Promise<void> {
 }
 ```
 
-**Live mic in one line (browser).** `session.attach(stream)` takes a browser MediaStream and does the capture for you — audio is resampled to PCM16 24 kHz mono and pushed in 40 ms chunks, video frames are sampled to JPEG at the session cadence:
+**Stream input with attach() — the one input path.** `session.attach(stream)` takes a live browser MediaStream and does the capture for you — audio is resampled to PCM16 24 kHz mono and pushed in 40 ms chunks, video frames are sampled to JPEG at the session cadence:
 
 ```ts
 const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true }); // audio-only streams work too
@@ -132,23 +130,18 @@ const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: t
 const attached = await session.attach(stream); // the one-liner above, now unattended
 ```
 
-**Feed it audio concurrently.** The SDK currently speaks 24 kHz PCM16 mono in 40 ms chunks. The audio push and the wave consumption must run at the same time — a blocking wave loop starves the audio — so we run them as concurrent tasks:
+**Stream programmatic input.** Off the browser, attach sources instead. Each source is an async iterable, a sync iterable, or a zero-arg callable returning the next chunk (null/undefined ends it): audio chunks are PCM16 24 kHz mono bytes, video chunks are JPEG bytes, text chunks are strings appended to the transcript. attach() pumps in the background — no run loop needed for pumping — and the turn opens on the first pushed chunk:
 
 ```ts
-async function sendAudio(chunks: AsyncGenerator<ArrayBuffer>, session: Session): Promise<void> {
-    for await (const chunk of chunks) {
-        session.audio.push(chunk); // PCM16, mono, 24 kHz; one 40 ms block
+const attached = await session.attach({ audio: mic.chunks() }); // mic, file, queue — same path
+async function readWaves(): Promise<void> {
+    for await (const wave of session.run()) {
+        ...
     }
-    await session.close(); // audio ended — end the run loop so readWaves returns
 }
-
-const chunks = mic.chunks();
-const first = await chunks.next(); // the turn opens on the first pushed chunk — push one before the wave loop starts
-if (!first.done) session.audio.push(first.value);
-const tasks = [sendAudio(chunks, session), readWaves()];
 ```
 
-`session.run()` can also take finite audio/video/text inputs and push them for you before reading waves; this example pushes audio manually to keep the mic and the level meter in step.
+`attached.stop()` stops the pumping; the wave loop returns when the source ends or `session.close()` runs.
 
 **Read decisions off each wave.** Every answered question `id` has a `result` with a `.value`, and a confidence/probability `.p`. Additionally:
 - Choices return confidences for each option in `.pOption(name)`(normalized so they form a discrete probability distribution).
@@ -172,14 +165,13 @@ if (detection.p >= 0.6) {
 }
 ```
 
-**Close in the correct order.** Stop the mic and close the session — `session.close()` ends the run loop, so the wave iteration above returns:
+**Close in the correct order.** Stop the pumping and close the session — `session.close()` ends the run loop, so the wave iteration above returns:
 ```ts
 try {
-    await Promise.race(tasks); // first task to finish: mic end or wire death
+    await readWaves(); // first to end: source end or wire death
 } finally {
-    mic.stop(); // unblocks sendAudio when the wave reader ends first
+    attached.stop(); // stops the pumping; a live MediaStream's tracks stay yours to stop
     await session.close();
-    await Promise.all(tasks); // settle both even when the race threw; the race error propagates after
 }
 ```
 

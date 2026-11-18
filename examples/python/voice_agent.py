@@ -166,13 +166,15 @@ async def main():
         else str(Path(__file__).parent / "assets" / "mic-question-48k-mono.wav")
     )
     session = app.session()
-    # Text input alongside the audio (e.g. a transcript from your own ASR): the model
-    # hears the audio directly; text is extra context and exercises session.text.
-    session.text.push("Hi — my internet has been down since this morning and I need help.")
     monitor = asyncio.create_task(barge_in_watch())
     start = time.monotonic()
     try:
-        session.attach(audio=wav_chunks(path))
+        # Text input alongside the audio (e.g. a transcript from your own ASR):
+        # the model hears the audio directly; text is extra context. attach is
+        # the one input path — audio and text both ride it.
+        session.attach(audio=wav_chunks(path), text=iter([
+            "Hi — my internet has been down since this morning and I need help.",
+        ]))
         waves = session.run()
         while True:
             try:

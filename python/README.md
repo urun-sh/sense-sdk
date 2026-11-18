@@ -144,7 +144,7 @@ finally:
 ```
 
 ## Next steps
-Beyond this example, the SDK also has `app.predicate(fn)` + `app.when(pred, handler)` for edge-triggered handlers, and `app.on_wave(handler)` to observe every completed wave. Refer to the [Sense reference](https://docs.urun.sh/docs/sense/reference?facet=session) for details.
+Beyond this example, the SDK also has `app.when(pred, handler)` for edge-triggered handlers and `app.on_wave(handler)` to observe every completed wave. Refer to the [Sense reference](https://docs.urun.sh/docs/sense/reference?facet=session) for details.
 
 ### Full example code
 

@@ -155,20 +155,26 @@ const raw = [];
 const coalesced = [];
 const whenFires = [];
 const session = app.session();
-session.onWave((ctx) => raw.push(ctx.latest()));
-session.onWave((ctx) => coalesced.push(ctx.latest()), { coalesce: true });
-session.when(finished.and(intent.eq("support")), (ctx) => whenFires.push(ctx.latest().waveId));
+session.context.onWave((ctx) => raw.push(ctx.latest()));
+session.context.onWave((ctx) => coalesced.push(ctx.latest()), { coalesce: true });
+session.context.when(finished.and(intent.eq("support")), (ctx) => whenFires.push(ctx.latest().waveId));
 
 async function* input() {
   const chunk = new Uint8Array(2 * 960); // 40 ms of PCM16 24 kHz mono
   for (let i = 0; i < 4; i++) {
-    yield { audio: chunk };
+    yield chunk;
     await new Promise((r) => setTimeout(r, 15));
   }
 }
 
+// attach() is the one input path; run() is the one wave-iteration path.
+const attached = await session.attach({ audio: input() });
 const runPromise = (async () => {
-  for await (const wave of session.run(input())) void wave;
+  try {
+    for await (const wave of session.run()) void wave;
+  } finally {
+    attached.stop();
+  }
 })();
 
 await new Promise((resolve) => {

@@ -116,13 +116,15 @@ function recordingTarget(): RecordingTarget {
   const pushedVideo: (Uint8Array | ArrayBuffer)[] = [];
   return {
     hz: 12.5,
-    audio: {
-      push: (pcm) => pushedAudio.push(pcm instanceof Uint8Array ? pcm : new Uint8Array(pcm)),
+    emitAudio: (b64: string) => {
+      pushedAudio.push(new Uint8Array(Buffer.from(b64, "base64")));
     },
-    video: { push: (jpeg) => pushedVideo.push(jpeg) },
+    emitVideo: (jpeg: Uint8Array | ArrayBuffer) => {
+      pushedVideo.push(jpeg instanceof Uint8Array ? jpeg : new Uint8Array(jpeg));
+    },
     pushedAudio,
     pushedVideo,
-  };
+  } as RecordingTarget;
 }
 
 /** Attach with the real worklet source flowing through the fake graph. */
@@ -261,12 +263,12 @@ describe("session.attach video & guards", () => {
     }
   });
 
-  test("without a browser, the error points at session.audio.push", async () => {
+  test("without a browser, the error points at session.attach({ audio: chunks })", async () => {
     const g = globalThis as { AudioContext?: unknown };
     const prev = g.AudioContext;
     delete g.AudioContext;
     try {
-      await expect(attachStream(recordingTarget(), audioOnly)).rejects.toThrow(/browser[\s\S]*session\.audio\.push/);
+      await expect(attachStream(recordingTarget(), audioOnly)).rejects.toThrow(/browser[\s\S]*session\.attach\(\{ audio: chunks \}\)/);
     } finally {
       g.AudioContext = prev;
     }

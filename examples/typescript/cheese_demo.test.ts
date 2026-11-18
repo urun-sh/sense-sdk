@@ -96,14 +96,19 @@ describe("toVerdict", () => {
 
 /** Minimal Session double: enough for the relay functions under test. */
 function fakeSession(opts: { connect?: () => Promise<void>; run?: () => AsyncGenerator<Wave> } = {}) {
-  const calls = { connect: 0, close: 0, run: 0, pushed: 0 as number };
+  const calls = { connect: 0, close: 0, run: 0, attach: 0 };
+  let source: AsyncGenerator<Uint8Array | ArrayBuffer> | null = null;
   const session = {
     connect: opts.connect ?? (async () => {}),
     run: opts.run ?? (async function* () {}),
-    audio: { push: () => { calls.pushed++; } },
+    attach: async (sources: { audio?: AsyncGenerator<Uint8Array | ArrayBuffer> }) => {
+      calls.attach++;
+      source = sources.audio ?? null;
+      return { stop() {} };
+    },
     close: () => { calls.close++; },
   };
-  return { calls, session: session as unknown as Session };
+  return { calls, session: session as unknown as Session, attachedSource: () => source };
 }
 
 function testRelay(session: Session | null, send: (event: unknown) => void = () => {}): Relay {
@@ -121,18 +126,22 @@ function testRelay(session: Session | null, send: (event: unknown) => void = () 
 }
 
 describe("relay lifecycle", () => {
-  test("frames buffer during the dial and flush in order before run()", async () => {
-    const { calls, session } = fakeSession();
+  test("frames buffer during the dial and stream through attach in order", async () => {
+    const { calls, session, attachedSource } = fakeSession();
     const relay = testRelay(session);
     const runPromise = pump(relay);
     handleAudio(relay, new Uint8Array(4));
     handleAudio(relay, new Uint8Array(8));
-    expect(relay.pending.length).toBe(2); // still dialing: buffered, not pushed
-    expect(calls.pushed).toBe(0);
+    expect(relay.pending.length).toBe(2); // still dialing: buffered, not attached yet
+    expect(calls.attach).toBe(0);
     await runPromise;
-    expect(calls.pushed).toBe(2); // flushed before the run loop consumed them
-    expect(relay.pending.length).toBe(0);
+    expect(calls.attach).toBe(1);
     expect(relay.streaming).toBe(true);
+    const src = attachedSource();
+    expect(src).not.toBeNull();
+    expect((await src!.next()).value.byteLength).toBe(4); // frames stream in order
+    expect((await src!.next()).value.byteLength).toBe(8);
+    expect(relay.pending.length).toBe(0); // the attach source drained the buffer
   });
 
   test("pump stops when the client leaves during the dial", async () => {
@@ -176,7 +185,7 @@ describe("relay lifecycle", () => {
     closeRelay(relay);
     handleAudio(relay, new Uint8Array(4));
     expect(relay.pending.length).toBe(0);
-    expect(calls.pushed).toBe(0);
+    expect(calls.attach).toBe(0);
   });
 
   test("pending buffer overflow ends the relay instead of growing unboundedly", () => {
@@ -189,7 +198,7 @@ describe("relay lifecycle", () => {
     handleAudio(relay, big);
     expect(ended).toBe(true);
     expect(relay.pending.length).toBe(0);
-    expect(calls.pushed).toBe(0);
+    expect(calls.attach).toBe(0);
     expect(sent.some((e) => (e as { type: string }).type === "error")).toBe(true);
   });
 

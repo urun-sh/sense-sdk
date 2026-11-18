@@ -314,7 +314,7 @@ class TestSession(unittest.TestCase):
             # the input_audio_buffer.append frame a fake lane receives for one
             # PCM16 chunk (no commit, no response.create while the turn is open)
             s._turn_open = True
-            s.audio.push(b"\x00\x00")
+            s._audio_in.push(b"\x00\x00")
             frames.clear()
             ok = await s._drain_outbound(FakeWS())
             self.assertTrue(ok)

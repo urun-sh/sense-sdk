@@ -1,5 +1,6 @@
 /** `session.attach(stream)` — one call to stream a live mic (and camera)
  * into a session. Ported from the console's realtime playground. */
+import { toB64 } from "./bytes.ts";
 import { JPEG_QUALITIES, PCM_WORKLET_SOURCE, VIDEO_MAX_BYTES, VIDEO_TARGET_WIDTH } from "./media.ts";
 
 /** Minimal structural view of a browser MediaStream (keeps DOM lib types out
@@ -9,11 +10,13 @@ export interface AttachStream {
   getVideoTracks(): unknown[];
 }
 
-/** What attach needs from a session: the two input buses and the frame
- * cadence. `Session` implements this; plain objects do for tests. */
+/** What attach needs from a session: the two internal input buses and the
+ * frame cadence. `Session` implements this; plain objects do for tests. */
 export interface AttachTarget {
-  readonly audio: { push(pcm: Uint8Array | ArrayBuffer, source?: string): void };
-  readonly video: { push(jpeg: Uint8Array | ArrayBuffer): void };
+  /** @internal PCM16 24 kHz mono chunk, base64-encoded for the wire. */
+  emitAudio(b64: string, source?: string): void;
+  /** @internal One JPEG frame. */
+  emitVideo(jpeg: Uint8Array | ArrayBuffer): void;
   readonly hz: number;
 }
 
@@ -100,8 +103,8 @@ export async function attachStream(
     const Ctor = g.AudioContext as (new (opts: { sampleRate: number }) => AudioContextLike) | undefined;
     if (!opts.audioContext && !Ctor) {
       throw new Error(
-        "session.attach() is browser-only (AudioContext not available). " +
-          "In Node, push PCM16 24 kHz mono chunks yourself: session.audio.push(pcm).",
+        "session.attach(stream) is browser-only (AudioContext not available). " +
+          "In Node, stream PCM16 24 kHz mono chunks yourself: session.attach({ audio: chunks }).",
       );
     }
     const ctx = opts.audioContext ? opts.audioContext(24_000) : new Ctor!({ sampleRate: 24_000 });
@@ -118,7 +121,7 @@ export async function attachStream(
     node.port.onmessage = (ev) => {
       if (stopped) return;
       const chunk = ev.data as { buffer: ArrayBuffer; byteOffset: number; byteLength: number }; // our own injected worklet's Int16Array message
-      target.audio.push(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+      target.emitAudio(toB64(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)));
     };
     ctx.createMediaStreamSource(stream).connect(node);
     // Pulled only if the graph reaches the destination — through zero gain,
@@ -153,7 +156,7 @@ export async function attachStream(
             if (!blob) return;
             const buf = await blob.arrayBuffer();
             busy = false;
-            if (!stopped) target.video.push(buf);
+            if (!stopped) target.emitVideo(buf);
           })
           .catch(() => {
             busy = false;

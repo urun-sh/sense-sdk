@@ -14,6 +14,7 @@ import {
   type SessionEvent,
   type WireDialer,
 } from "../src/index.ts";
+import { toB64 } from "../src/bytes.ts";
 
 const QUESTIONS = [
   new Question({ name: "finished", kind: "noul", instructions: "finished?" }),
@@ -177,10 +178,10 @@ describe("session pieces", () => {
     const s = new Session({ apiKey: "k" });
     const sent: unknown[] = [];
     Object.defineProperty(s, "sendJson", { value: (o: unknown) => sent.push(o) });
-    s.text.push("hello");
-    s.text.push("hello", "append");
-    s.text.push("reset", "replace");
-    s.text.push("once", "event");
+    s.emitText("hello", "append");
+    s.emitText("hello", "append");
+    s.emitText("reset", "replace");
+    s.emitText("once", "event");
     s.bargeIn();
     expect(sent.at(-1)).toEqual({ type: "response.cancel" });
   });
@@ -191,7 +192,7 @@ describe("session pieces", () => {
 
   test("frame too large refuses at push", () => {
     const s = new Session({ apiKey: "k" });
-    expect(() => s.video.push(new Uint8Array(256_001))).toThrow(ProtocolError);
+    expect(() => s.emitVideo(new Uint8Array(256_001))).toThrow(ProtocolError);
   });
 });
 
@@ -287,7 +288,7 @@ describe("coalescing", () => {
   test("session.onWave coalesce passes through to the context", () => {
     const s = new Session({ apiKey: "k", questions: QUESTIONS });
     const seen: number[] = [];
-    s.onWave((c) => seen.push(c.latest()!.waveId), { coalesce: true });
+    s.context.onWave((c) => seen.push(c.latest()!.waveId), { coalesce: true });
     s.context.ingest(fullWave(0, true, "support"));
     s.context.ingest(fullWave(1, true, "support"));
     s.context.ingest(fullWave(2, false, "sales"));
@@ -547,7 +548,7 @@ describe("wedge self-heal", () => {
       },
     });
     await s.connect();
-    s.text.push("the pushed state", "replace");
+    s.emitText("the pushed state", "replace");
     const refuse = { type: "error", error: { code: "response_in_progress" } };
     wires[0]!.emit(refuse);
     wires[0]!.emit(refuse);
@@ -559,7 +560,7 @@ describe("wedge self-heal", () => {
     expect(s.stats.reconnects).toBe(1);
     // Questions and the pushed state both ride the fresh dial.
     expect(JSON.stringify(updateEnvelope(wires[1]!.sent))).toContain('"finished"');
-    s.audio.push(new Uint8Array(1920));
+    s.emitAudio(toB64(new Uint8Array(1920)));
     const loop = s.run().next(); // opens the turn, then parks for a wave
     await drain();
     const text = wires[1]!.sent.find(
@@ -582,7 +583,7 @@ describe("reconnect window", () => {
       const consuming = s.run().next(); // the parked loop wakes after reconnect
       await drain();
       wires[0]!.drop(1000);
-      s.audio.push(new Uint8Array(48)); // during the backoff window: sendJson would no-op
+      s.emitAudio(toB64(new Uint8Array(48))); // during the backoff window: sendJson would no-op
       vi.advanceTimersByTime(60_000);
       await drain();
       expect(wires.length).toBe(2);
@@ -651,10 +652,21 @@ describe("run loop on wire death", () => {
         wireFactory: recordingFactory(keys, wires),
       });
       await s.connect();
-      const consuming = s.run((async function* () {
-        yield { audio: new Uint8Array(48) };
-      })()).next();
-      await drain(); // input applied, first turn opens on wire 1
+      const consuming = (async () => {
+        const attached = await s.attach({
+          audio: (async function* () {
+            yield new Uint8Array(48);
+          })(),
+        });
+        try {
+          return await s.run().next();
+        } finally {
+          attached.stop();
+        }
+      })();
+      await drain(); // the pump pushed the chunk through attach
+      vi.advanceTimersByTime(250); // run-loop wake re-evaluates: first turn opens on wire 1
+      await drain();
       const first = wires[0]!.sent.map((m) => (typeof m === "object" && m !== null && "type" in m ? m.type : ""));
       expect(first).toContain("input_audio_buffer.commit");
       expect(first).toContain("response.create");
@@ -671,7 +683,7 @@ describe("run loop on wire death", () => {
       // turn on the LIVE wire (never into the void), and the commit binds the
       // post-reconnect audio — the pre-death buffer was dropped, so the
       // reopened turn is never an empty one.
-      s.audio.push(new Uint8Array(48));
+      s.emitAudio(toB64(new Uint8Array(48)));
       vi.advanceTimersByTime(1_000); // wake re-evaluates on the live wire
       await drain();
       const second = typesOn(wires[1]!);
@@ -738,14 +750,14 @@ describe("turn boundary on cancel", () => {
         // discard; the loop must keep turning
       }
     })();
-    s.audio.push(new Uint8Array(960));
+    s.emitAudio(toB64(new Uint8Array(960)));
     await waitFor(() => sentHas(w, "response.create"), 2_000);
     // barge-in: response.cancel out, response.cancelled back — then the
     // cadence is dead, so only the wake can re-open the turn.
     s.bargeIn();
     w.messageCb?.(JSON.stringify({ type: "response.cancelled" }));
     w.sent.length = 0;
-    s.audio.push(new Uint8Array(960));
+    s.emitAudio(toB64(new Uint8Array(960)));
     await waitFor(() => sentHas(w, "response.create"), 2_000);
     expect(s.stats.turns).toBe(2);
     await s.close();
@@ -760,12 +772,12 @@ describe("turn boundary on cancel", () => {
         // discard
       }
     })();
-    s.audio.push(new Uint8Array(960));
+    s.emitAudio(toB64(new Uint8Array(960)));
     await waitFor(() => sentHas(w, "response.create"), 2_000);
     s.bargeIn();
     w.messageCb?.(JSON.stringify({ type: "response.cancelled" }));
     w.sent.length = 0;
-    s.audio.push(new Uint8Array(960));
+    s.emitAudio(toB64(new Uint8Array(960)));
     await waitFor(() => sentHas(w, "response.create"), 2_000);
     // The server refuses the reopen: the client must go quiet, not retry at
     // wake cadence, until the backoff elapses.
@@ -773,7 +785,7 @@ describe("turn boundary on cancel", () => {
     w.messageCb?.(JSON.stringify({ type: "error", error: { code: "response_in_progress" } }));
     await new Promise((r) => setTimeout(r, 1_000));
     expect(sentHas(w, "response.create")).toBe(false);
-    s.audio.push(new Uint8Array(960));
+    s.emitAudio(toB64(new Uint8Array(960)));
     await waitFor(() => sentHas(w, "response.create"), 4_000);
     await s.close();
   });
@@ -816,7 +828,7 @@ describe("out of credits", () => {
     await s.connect();
     const events: SessionEvent[] = [];
     s.onEvent((ev) => events.push(ev));
-    const it = s.waves()[Symbol.asyncIterator]();
+    const it = s.run()[Symbol.asyncIterator]();
     const next = it.next(); // parks a waiter, as a live consumer would
     wires[0]!.emit({
       type: "error",
@@ -849,7 +861,7 @@ describe("out of credits", () => {
     await s.connect();
     const events: SessionEvent[] = [];
     s.onEvent((ev) => events.push(ev));
-    const it = s.waves()[Symbol.asyncIterator]();
+    const it = s.run()[Symbol.asyncIterator]();
     const next = it.next();
     wires[0]!.drop(1011, "credits_exhausted");
     await expect(next).rejects.toBeInstanceOf(OutOfCreditsError);
@@ -903,7 +915,7 @@ describe("explicit presence", () => {
       vi.advanceTimersByTime(20_000);
       expect(presenceFrames(wires[0]!)).toHaveLength(3);
       // An app-level send re-asserts presence (refreshes the activity window).
-      s.text.push("still here");
+      s.emitText("still here", "append");
       vi.advanceTimersByTime(30_000);
       expect(presenceFrames(wires[0]!)).toHaveLength(6);
       await s.close();

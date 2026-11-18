@@ -91,8 +91,8 @@ export class Sense {
       allowInsecure: this.allowInsecure,
       questions: this.questions,
     });
-    for (const { pred, handler } of this.whens) s.when(pred, handler);
-    for (const { handler, opts } of this.waveHandlers) s.onWave(handler, opts);
+    for (const { pred, handler } of this.whens) s.context.when(pred, handler);
+    for (const { handler, opts } of this.waveHandlers) s.context.onWave(handler, opts);
     return s;
   }
 }

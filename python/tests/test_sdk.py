@@ -283,7 +283,7 @@ def test_facade_registers_questions():
         "other": "Anything else",
     }
     assert env["questions"]["urgency"]["criteria"] == ["routine, can wait", "blocking, act now"]
-    assert callable(app.predicate(lambda w: True))
+    assert callable(Predicate(lambda w: True))
 
 
 def test_jev_shape_only():
@@ -472,24 +472,18 @@ def test_history_bounded_512():
     assert ctx.waves()[0].wave_id == 88  # 600 - 512
 
 
-def test_session_waves_is_live_subscription():
-    async def go():
-        s = Session(api_key="sk-test")
-        got = []
-
-        async def consume():
-            async for w in s.waves():
-                got.append(w.wave_id)
-
-        task = asyncio.create_task(consume())
-        await asyncio.sleep(0)
-        s._accept(Wave.decode(questions(), payload(0, 0)))
-        s._accept(Wave.decode(questions(), payload(1, 40)))
-        await asyncio.sleep(0)
-        assert got == [0, 1]
-        task.cancel()
-
-    asyncio.run(go())
+def test_session_waves_gone_run_is_the_one_iterator():
+    # One wave-iteration path: session.run(). The old live `waves()`
+    # subscription was a second spelling and is deleted.
+    assert not hasattr(Session(api_key="sk-test"), "waves")
+    assert not hasattr(Session(api_key="sk-test"), "latest")
+    assert not hasattr(Session(api_key="sk-test"), "when")
+    assert not hasattr(Session(api_key="sk-test"), "on_wave")
+    assert not hasattr(Sense, "predicate")
+    assert not hasattr(Session(api_key="sk-test"), "audio")
+    assert not hasattr(Session(api_key="sk-test"), "video")
+    assert not hasattr(Session(api_key="sk-test"), "text")
+    assert not hasattr(Session(api_key="sk-test"), "connect")
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +556,7 @@ def test_wire_text_only_session():
 
             task = asyncio.create_task(_consume(s, got))
             # TEXT ONLY: a text push opens and drives the turn, zero audio.
-            s.text.push("Say something.")
+            s._text_in.push("Say something.")
             for _ in range(500):
                 if got:
                     break
@@ -736,14 +730,14 @@ def test_wire_happy_path():
             s = Session(api_key="sk-test", base_url=f"http://127.0.0.1:{port}", hz=12.5)
             _register(s)
             fired = []
-            s.when(Predicate(("q", "finished", None)), lambda c: fired.append(c.latest().wave_id))
+            s._ctx.when(Predicate(("q", "finished", None)), lambda c: fired.append(c.latest().wave_id))
             got = []
             task = asyncio.create_task(_consume(s, got))
             # Mic-style: each push drives the turn lifecycle. Turn 1 (waves
             # 0+1) opens on the first push; the second push opens turn 2.
-            s.audio.push(b"\x00\x00" * 48)
+            s._audio_in.push(b"\x00\x00" * 48)
             await _wait_until(lambda: len(got) >= 2)
-            s.audio.push(b"\x00\x00" * 48)
+            s._audio_in.push(b"\x00\x00" * 48)
             await _wait_until(lambda: len(got) >= 3)
             task.cancel()
             await s.close()
@@ -800,7 +794,7 @@ def test_wave_t_ms_prefers_the_media_position():
             _register(s)
             got = []
             task = asyncio.create_task(_consume(s, got))
-            s.audio.push(b"\x00\x00" * 48)
+            s._audio_in.push(b"\x00\x00" * 48)
             await _wait_until(lambda: len(got) >= 1)
             task.cancel()
             await s.close()
@@ -838,7 +832,7 @@ def test_wire_incomplete_wave_is_protocol_error():
             got = []
 
             task = asyncio.create_task(_consume(s, got))
-            s.audio.push(b"\x00\x00" * 48)  # the push opens the turn
+            s._audio_in.push(b"\x00\x00" * 48)  # the push opens the turn
             try:
                 await asyncio.wait_for(task, timeout=2.0)
             except asyncio.TimeoutError:
@@ -868,9 +862,9 @@ def test_wire_session_gone_reconnects_fresh():
             # First push opens a turn on connection 1; the lane dies with
             # session_gone, the SDK reconnects fresh, and a second push
             # opens the turn on connection 2.
-            s.audio.push(b"\x00\x00" * 48)
+            s._audio_in.push(b"\x00\x00" * 48)
             await asyncio.sleep(0.3)
-            s.audio.push(b"\x00\x00" * 48)
+            s._audio_in.push(b"\x00\x00" * 48)
             await _wait_until(lambda: len(got) >= 1)
             task.cancel()
             await s.close()
@@ -913,7 +907,7 @@ def test_wire_insufficient_credits_is_terminal():
             _register(s)
             got = []
             task = asyncio.create_task(_consume(s, got))
-            s.audio.push(b"\x00\x00" * 48)  # the push opens the turn
+            s._audio_in.push(b"\x00\x00" * 48)  # the push opens the turn
             with pytest.raises(OutOfCreditsError):
                 await asyncio.wait_for(task, timeout=2.0)
             # The cut is an end, not churn: no reconnect dial may follow.
@@ -942,7 +936,7 @@ def test_wire_close_reason_credits_exhausted_is_terminal():
             _register(s)
             got = []
             task = asyncio.create_task(_consume(s, got))
-            s.audio.push(b"\x00\x00" * 48)
+            s._audio_in.push(b"\x00\x00" * 48)
             with pytest.raises(OutOfCreditsError):
                 await asyncio.wait_for(task, timeout=2.0)
             await asyncio.sleep(0.3)
@@ -1030,7 +1024,7 @@ def test_explicit_presence_frames(monkeypatch):
                 return state["types"].count("session.presence")
 
             # App activity keeps the window open: frames flow every cadence.
-            s.text.push("still here")
+            s._text_in.push("still here")
             await _wait_until(lambda: state["types"].count("session.presence") >= 2)
             # The wire frame is exactly the presence marker, no extra fields.
             s.keepalive()
@@ -1047,7 +1041,7 @@ def test_explicit_presence_frames(monkeypatch):
             await asyncio.sleep(0.7)
             assert state["types"].count("session.presence") == n
             # A fresh app send re-asserts presence.
-            s.text.push("back")
+            s._text_in.push("back")
             await _wait_until(lambda: state["types"].count("session.presence") >= n + 1)
             task.cancel()
             await s.close()

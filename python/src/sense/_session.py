@@ -27,10 +27,8 @@ import aiohttp
 from ._core import (
     Context,
     OutOfCreditsError,
-    Predicate,
     ProtocolError,
     Question,
-    Result,
     Wave,
     WaveAssembler,
 )
@@ -94,7 +92,7 @@ MAX_PENDING_TEXT_ITEMS = 256
 PRESENCE_IDLE_S = 60.0
 PRESENCE_CADENCE_S = 10.0
 
-__all__ = ["AttachHandle", "AudioInput", "Session", "SessionStats", "TextInput", "VideoInput"]
+__all__ = ["AttachHandle", "Session", "SessionStats"]
 
 
 class SenseUnavailable(RuntimeError):
@@ -113,7 +111,7 @@ class SessionStats:
     protocol_errors: int = 0
 
 
-class AudioInput:
+class _AudioInput:
     __slots__ = ("_s",)
 
     def __init__(self, session: Session) -> None:
@@ -128,7 +126,7 @@ class AudioInput:
         self._s._enqueue_audio(source, base64.b64encode(bytes(pcm_bytes)).decode("ascii"))
 
 
-class VideoInput:
+class _VideoInput:
     __slots__ = ("_s",)
 
     def __init__(self, session: Session) -> None:
@@ -142,7 +140,7 @@ class VideoInput:
         self._s._enqueue_video(base64.b64encode(bytes(jpeg_bytes)).decode("ascii"))
 
 
-class TextInput:
+class _TextInput:
     __slots__ = ("_s",)
 
     def __init__(self, session: Session) -> None:
@@ -221,7 +219,6 @@ class Session:
         self._transcript = ""
         self._audio: dict[str, deque] = {}
         self._active_source = "default"  # last input source drained (labeling)
-        self._wave_sinks: list[Callable[[Wave], None]] = []
         self._video: deque = deque(maxlen=1)  # latest frame wins
         self._text_out: deque = deque(maxlen=MAX_PENDING_TEXT_ITEMS)
         self._wake: asyncio.Event | None = None
@@ -230,9 +227,9 @@ class Session:
         self._pumps: list[asyncio.Task] = []  # attach()ed input pumps
         self._loop: asyncio.AbstractEventLoop | None = None
         self._wire: Wire | None = None
-        self.audio = AudioInput(self)
-        self.video = VideoInput(self)
-        self.text = TextInput(self)
+        self._audio_in = _AudioInput(self)
+        self._video_in = _VideoInput(self)
+        self._text_in = _TextInput(self)
         #: Last app-level send (audio/video/text push, barge-in, keepalive).
         #: A freshly created session is present until this lapses.
         self._last_activity = time.monotonic()
@@ -279,57 +276,14 @@ class Session:
     def _envelope(self) -> dict:
         return {"questions": {q.name: q.to_envelope() for q in self.questions}, "hz": self.hz}
 
-    # -- delegation to the context -----------------------------------------
+    # -- wave handlers (the facade registers; see Sense.when / Sense.on_wave) --
 
-    def latest(self, question: Question | str, *, source: str | None = None) -> Result:
-        w = self._ctx.latest(source)
-        if w is None:
-            raise ProtocolError("no waves yet")
-        return w.result(question)
-
-    def when(self, pred: Predicate, handler: Callable, *, source: str | None = None) -> Any:
-        return self._ctx.when(pred, handler, source=source)
-
-    def on_wave(
+    def _on_wave(
         self, handler: Callable, coalesce: bool = False, *, source: str | None = None
     ) -> None:
         """Observe waves. ``coalesce=True`` skips consecutive same-argmax
         waves (latest wins); ``source=`` restricts to one input source."""
         self._onwave_handlers.append((handler, coalesce, source))
-
-    def waves(self, coalesce: bool = False):
-        """LIVE bounded subscription (queue of 64): yields waves as they are
-        assembled, without competing with :meth:`run` delivery — run() stays
-        the primary consumption path. Waves produced before subscription are
-        not replayed; the queue drops the oldest under pressure."""
-        q: asyncio.Queue = asyncio.Queue(maxsize=64)
-
-        def _sink(wave: Wave) -> None:
-            if q.full():
-                q.get_nowait()
-            q.put_nowait(wave)
-
-        self._wave_sinks.append(_sink)
-
-        async def _iter():
-            prev: Wave | None = None
-            try:
-                while True:
-                    w = await q.get()
-                    if w is None:
-                        return
-                    if coalesce and prev is not None and prev._argmax == w._argmax:
-                        prev = w
-                        continue
-                    prev = w
-                    yield w
-            finally:
-                try:
-                    self._wave_sinks.remove(_sink)
-                except ValueError:
-                    pass
-
-        return _iter()
 
     def _accept(self, wave: Wave) -> None:
         # When the server omits a source label, attribute the wave to the
@@ -344,8 +298,6 @@ class Session:
             if coalesce and prev is not None and prev._argmax == wave._argmax:
                 continue
             self._ctx._fire(handler)
-        for sink in list(self._wave_sinks):
-            sink(wave)
         self.stats.waves += 1
 
     # -- outbound queues -----------------------------------------------------
@@ -537,7 +489,7 @@ class Session:
         zero-arg callable returning the next chunk (``None`` ends): audio
         chunks are raw PCM16 24 kHz mono bytes, video chunks are JPEG bytes,
         text chunks are strings. Chunks are queued and drained onto the wire
-        while the lane is live; ``run()``/``waves()`` consume the waves.
+        while the lane is live; ``run()`` consumes the waves.
 
         Call it from async code (before or during ``run()``); the pumps stop
         when the session closes or the returned handle is ``detach()``ed."""
@@ -553,9 +505,9 @@ class Session:
         tasks = [
             loop.create_task(self._pump_one(src, push), name=f"sense-attach-{what}")
             for what, src, push in (
-                ("audio", audio, self.audio.push),
-                ("video", video, self.video.push),
-                ("text", text, self.text.push),
+                ("audio", audio, self._audio_in.push),
+                ("video", video, self._video_in.push),
+                ("text", text, self._text_in.push),
             )
             if src is not None
         ]
@@ -976,8 +928,6 @@ class Session:
             t.cancel()
         for key in list(self._ctx._tasks):
             self._ctx.cancel(key, barge_in=False)
-        for sink in list(self._wave_sinks):
-            sink(None)  # type: ignore[arg-type]  # sentinel: end live subscriptions
         wake = self._wake
         if wake is not None:
             wake.set()
