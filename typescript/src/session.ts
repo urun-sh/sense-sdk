@@ -772,13 +772,9 @@ export class Session {
       return;
     }
     const qid = String(ev.id ?? ev.question ?? "");
-    if (!qid) {
-      this.wdbg(`decision line matched but NO qid: ${trimmed.slice(0, 100)}`);
-      return;
-    }
+    if (!qid) return;
     if (this.accumulator.has(qid)) this.flushAccumulator();
     this.accumulator.set(qid, ev);
-    if (this.wdbgCount <= 3 || this.wdbgCount % 200 === 0) this.wdbg(`decision accumulated qid=${qid} size=${this.accumulator.size}`);
     // The wave's tMs is the decision's MEDIA timestamp (protocol §6).
     // audio_t_ms IS that position on every seat since 2026-11-05; older
     // seats stamped per-wave COMPUTE time in t_ms — prefer the position.
