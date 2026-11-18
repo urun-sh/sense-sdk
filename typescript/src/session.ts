@@ -30,6 +30,14 @@ const MAX_PENDING_AUDIO_CHUNKS = 1500;
 const PRESENCE_IDLE_MS = 60_000;
 const PRESENCE_CADENCE_MS = 10_000;
 
+/** Keepalive event types the SDK itself sends on the realtime lane. An
+ * adapter that rejects one with `unknown_event` gets it muted for the rest
+ * of that connection (liveness still comes from audio frames). */
+const KEEPALIVE_EVENTS: Record<string, true> = {
+  "session.presence": true,
+  ping: true,
+};
+
 /** Read an environment variable without referencing `process.env.NAME`
  * literally: bundlers that define-substitute that expression would inline the
  * build machine's secret into client bundles. Returns undefined off Node/Bun. */
@@ -171,6 +179,12 @@ export class Session {
   private driveWaiters: (() => void)[] = [];
   /** A dial already in flight; a second connect() joins it instead of double-dialing. */
   private connecting: Promise<void> | null = null;
+  /** Keepalive event types the current adapter has rejected with
+   * `unknown_event` (per connection; reset on every dial). */
+  private mutedKeepalive = new Set<string>();
+  /** Client-chosen sticky id for /v1/realtime/calls dials (?dcid): stable
+   * per session so a reconnect re-binds to the same member. */
+  private readonly dcid = crypto.randomUUID();
 
   constructor(opts: SessionOptions = {}) {
     this.apiKeyProvider = opts.apiKey ?? envVar("URUN_API_KEY") ?? "";
@@ -235,9 +249,14 @@ export class Session {
    * all app events); a lapsed window sends nothing. */
   private startPresence(): void {
     if (this.presenceTimer !== null || this.isClosed) return;
-    this.presenceTimer = setInterval(() => {
-      if (Date.now() - this.lastActivityAt < PRESENCE_IDLE_MS) this.sendJson({ type: "session.presence" });
-    }, PRESENCE_CADENCE_MS);
+    this.presenceTimer = setInterval(() => this.presenceTick(), PRESENCE_CADENCE_MS);
+  }
+
+  /** One presence cadence tick: send `{"type":"session.presence"}` while the
+   * app is inside the idle window and the adapter has not muted the type. */
+  private presenceTick(): void {
+    if (this.mutedKeepalive.has("session.presence")) return;
+    if (Date.now() - this.lastActivityAt < PRESENCE_IDLE_MS) this.sendJson({ type: "session.presence" });
   }
 
   private stopPresence(): void {
@@ -416,6 +435,7 @@ export class Session {
           apiBaseUrl: this.baseUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:").replace(/\/+$/, ""),
           apiKey,
           model: this.model,
+          dcid: this.dcid,
           wsUrl: this.realtimeUrl(),
         });
         await this.install(wire);
@@ -451,6 +471,7 @@ export class Session {
     this.connectedAt = Date.now();
     this.streamsEnded = false;
     this.wedgeRefusals = 0;
+    this.mutedKeepalive.clear(); // new connection: the adapter may speak them now
     // A fresh server session has no in-flight response: a backoff earned on
     // the old wire must not delay the first turn on the new one.
     this.reopenNotBefore = 0;
@@ -626,44 +647,63 @@ export class Session {
 
   /** Returns true when the error was handled locally and needs no listener dispatch. */
   private onErrorMessage(msg: Record<string, unknown>): boolean {
-    this.stats.errors++;
     const err = msg.error as Record<string, unknown> | undefined;
     const code = err?.code;
+    if (code === "unknown_event" && this.onUnknownKeepalive(err)) return true;
+    this.stats.errors++;
     if (code === "insufficient_credits") return this.onInsufficientCredits(err);
     if (code === "empty_buffer" || code === "audio_input_transcript_unavailable") return true; // benign (§5.1, §7)
     if (code === "buffer_full") {
       this.sendJson({ type: "input_audio_buffer.commit" });
       return true;
     }
-    if (code === "response_in_progress") {
-      // A response is still running server-side (typically ours, racing its
-      // own cancellation). Do NOT retry immediately: a response.create storm
-      // into a cancelling lane keeps it wedged. Back off, let the in-flight
-      // response end (done/cancelled), then the run loop re-opens.
-      this.reopenNotBefore = Date.now() + 2_000;
-      this.turnOpen = false;
-      // A live cadence turn the server never settles bricks the lane: the
-      // cancelled response never resolves (no done/cancelled event), every
-      // reopened turn is refused with response_in_progress, and commits bind
-      // nothing (empty_buffer). Prod evidence 2026-11-15: any barge-in
-      // (question or state edits) left the session spinning on this pair
-      // forever. Three refusals in a row with no wave in between (~6 s of
-      // 2 s backoff) is the stuck signature, not the cancel race — drop the
-      // wire and let the §7 reconnect dial a FRESH server session.
-      if (++this.wedgeRefusals >= 3) {
-        this.wedgeRefusals = 0;
-        console.error("[sense] response_in_progress refused 3x with no waves — redialing fresh");
-        this.selfHealing = true;
-        // Do NOT null this.wire first: the install() close guard only routes a
-        // close from the CURRENT wire into onClose, which runs the redial.
-        void this.wire?.close();
-      }
-      return true;
-    }
+    if (code === "response_in_progress") return this.onResponseInProgress();
     // mid-turn failure: end the turn; the run loop re-opens.
     console.error(`[sense] lane error: ${JSON.stringify(msg.error)}`);
     this.turnOpen = false;
     return false;
+  }
+
+  /** A response is still running server-side (typically ours, racing its
+   * own cancellation). Do NOT retry immediately: a response.create storm
+   * into a cancelling lane keeps it wedged. Back off, let the in-flight
+   * response end (done/cancelled), then the run loop re-opens. */
+  private onResponseInProgress(): boolean {
+    this.reopenNotBefore = Date.now() + 2_000;
+    this.turnOpen = false;
+    // A live cadence turn the server never settles bricks the lane: the
+    // cancelled response never resolves (no done/cancelled event), every
+    // reopened turn is refused with response_in_progress, and commits bind
+    // nothing (empty_buffer). Prod evidence 2026-11-15: any barge-in
+    // (question or state edits) left the session spinning on this pair
+    // forever. Three refusals in a row with no wave in between (~6 s of
+    // 2 s backoff) is the stuck signature, not the cancel race — drop the
+    // wire and let the §7 reconnect dial a FRESH server session.
+    if (++this.wedgeRefusals >= 3) {
+      this.wedgeRefusals = 0;
+      console.error("[sense] response_in_progress refused 3x with no waves — redialing fresh");
+      this.selfHealing = true;
+      // Do NOT null this.wire first: the install() close guard only routes a
+      // close from the CURRENT wire into onClose, which runs the redial.
+      void this.wire?.close();
+    }
+    return true;
+  }
+
+  /** An `unknown_event` naming one of the SDK's own keepalive types
+   * (`session.presence`, `ping`) is expected on adapters that don't speak
+   * them: mute that type for the rest of the connection (liveness still
+   * comes from audio frames), log at debug, don't count it as an error.
+   * Any other unknown_event falls through loud. */
+  private onUnknownKeepalive(err: Record<string, unknown> | undefined): boolean {
+    const message = typeof err?.message === "string" ? err.message : "";
+    const match = /event type\s+(\S+)\s+is not supported/.exec(message);
+    if (match === null) return false;
+    const type = match[1]!;
+    if (!(type in KEEPALIVE_EVENTS)) return false;
+    this.mutedKeepalive.add(type);
+    console.debug(`[sense] adapter does not support keepalive event ${type}; muted for this connection`);
+    return true;
   }
 
   /** Terminal credits cut (wire contract): ONE error event, then close 1011.

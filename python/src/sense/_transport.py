@@ -39,7 +39,7 @@ log = logging.getLogger("sense")
 #: 2026-11-15; the relay hop adds its own fetch), so prod fell back off a
 #: rung that would have connected. WebRTC gets a longer budget for
 #: ICE + DTLS + datachannel open.
-TRANSPORT_DIAL_TIMEOUTS_S = {"quic": 5.0, "webrtc": 10.0}
+TRANSPORT_DIAL_TIMEOUTS_S = {"quic": 5.0, "webrtc": 30.0}
 
 #: Largest single inbound message (websocket frame / datachannel message)
 #: the client accepts. Server events are small JSON; this only bounds memory
@@ -171,14 +171,26 @@ class WsWire(Wire):
         await self._ws.send_json(payload)
 
     async def receive(self) -> str | None:
-        """Wait for one text frame; set the close code and return None on close."""
-        msg = await self._ws.receive()
-        if msg.type is aiohttp.WSMsgType.TEXT:
-            return msg.data
-        self.close_code = self._ws.close_code
-        self.close_reason = msg.extra
-        self.closed = True
-        return None
+        """Wait for one text frame; set the close code and return None on close.
+
+        Server events may ride BINARY frames (prod lax does this: its first
+        output event lands as a binary frame ~170 ms after the dial). Those
+        carry UTF-8 event JSON just like text frames — the TS SDK stringifies
+        every message buffer — so decode and return them. PING/PONG are
+        answered by aiohttp and skipped. Only real CLOSE/CLOSED/ERROR ends
+        the wire."""
+        while True:
+            msg = await self._ws.receive()
+            if msg.type is aiohttp.WSMsgType.TEXT:
+                return msg.data
+            if msg.type is aiohttp.WSMsgType.BINARY:
+                return msg.data.decode("utf-8", "replace")
+            if msg.type in (aiohttp.WSMsgType.PING, aiohttp.WSMsgType.PONG):
+                continue  # keepalive noise; aiohttp already answered the ping
+            self.close_code = self._ws.close_code
+            self.close_reason = msg.extra
+            self.closed = True
+            return None
 
     async def close(self) -> None:
         """Close the websocket and its client session, swallowing errors."""
@@ -555,21 +567,31 @@ class RtcWire(Wire):
         self._msgs: asyncio.Queue[str | None] = asyncio.Queue()
 
     async def connect(
-        self, http: aiohttp.ClientSession, calls_url: str, api_key: str, model: str
+        self, http: aiohttp.ClientSession, calls_url: str, api_key: str, model: str,
+        *, dcid: str,
     ) -> None:
         """Open the peer connection, POST the offer, and wait for the datachannel."""
         try:
             from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
         except ImportError as exc:
             raise TransportFailed(
-                "aiortc not installed (pip install 'urun-sense[webrtc]')"
+                "aiortc not installed (pip install urun-sense)"
             ) from exc
 
         # No STUN/TURN: the SFU is reached via host candidates on its
         # announced ports (aiortc's default STUN adds a 5s gather timeout).
         pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=[]))
         self._pc = pc
-        dc = pc.createDataChannel("oai-events")
+        # The SFU binds oai-events to SCTP stream 0 OUT OF BAND (fixed sid,
+        # both directions) and writes raw JSON on it — no DCEP handshake (verified
+        # prod lax 2026-11-18: server events land as PPID-51 strings on stream 0
+        # within 200 ms of attach). A negotiated id-0 channel registers stream 0
+        # locally without DCEP, so those payloads are delivered to it, and SDK
+        # sends ride the same stream the SFU's producer reads. A client-DCEP
+        # channel on id 0 breaks under a duplicate OPEN (aiortc asserts; browsers
+        # ignore), and a negotiated id on any other stream drops every server
+        # event (stream 0 never registers).
+        dc = pc.createDataChannel("oai-events", negotiated=True, id=0)
         self._dc = dc
         # The SDK's media rides the event channel as JSON; the audio m-line
         # exists so the SFU's sendrecv merge can answer. We listen only.
@@ -582,7 +604,7 @@ class RtcWire(Wire):
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
         res = await http.post(
-            f"{calls_url}?model={urllib.parse.quote(model)}",
+            f"{calls_url}?model={urllib.parse.quote(model)}&dcid={urllib.parse.quote(dcid)}",
             data=pc.localDescription.sdp,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/sdp"},
             # Never replay the bearer key to wherever a redirect points.
@@ -619,7 +641,8 @@ class RtcWire(Wire):
             self._msgs.put_nowait(None)
 
     async def _wait_dc_open(self) -> None:
-        """Wait for the datachannel to open, raising if ICE or the connection fails."""
+        """Wait for the negotiated datachannel to go open (SCTP association up),
+        raising if ICE or the connection fails first."""
         while self._dc.readyState != "open":
             if self._pc.connectionState in ("failed", "closed"):
                 raise TransportFailed(

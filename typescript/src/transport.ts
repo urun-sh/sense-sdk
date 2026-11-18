@@ -26,7 +26,9 @@ export const TRANSPORT_DIAL_TIMEOUT_MS: Record<'quic' | 'webrtc', number> = {
   // the whole POST→WT-ready→hello-ack dance through the console's same-origin
   // relay (1.2–1.8 s direct, 2026-11-15; the relay hop adds its own fetch),
   // so prod fell back off a rung that would have connected.
-  webrtc: 10_000, // ICE + DTLS + datachannel open
+  webrtc: 30_000, // the calls POST queues through the pool like the WS lane
+  // (observed up to 17 s at prod lax 2026-11-18) + ICE gather + DTLS +
+  // datachannel open — 10 s expired with the channel milliseconds away
 }
 
 /** Largest single inbound websocket message accepted (server events are small JSON). */
@@ -158,6 +160,43 @@ type WsCtor = new (
   options: { headers: Record<string, string>; maxPayload: number; followRedirects: false },
 ) => WsLike
 
+/** Node ships no WebTransport. When the global is missing on Node, load the
+ * maintained ponyfill @fails-components/webtransport (WHATWG-shaped client
+ * over HTTP/3; the native quiche binding ships prebuilt, no compile on
+ * install — live-verified against prod lax 2026-11-18). Browsers have a
+ * native and never touch this path; the runtime-built specifier keeps
+ * browser bundlers from resolving the import into their bundles. WebRTC
+ * stays ws-only on Node: werift 0.27.0 completes the SDP exchange but its
+ * ICE/DTLS never opens the datachannel against the lax SFU (phase-logged
+ * 30 s, 2026-11-18), and no prebuilt W3C-shaped alternative was validated. */
+async function nodePonyfill(): Promise<unknown | undefined> {
+  const env = globalThis as typeof globalThis & { process?: { versions?: { node?: string } } }
+  if (typeof env.process?.versions?.node !== 'string') return undefined
+  try {
+    const pkg = '@fails' + '-components/webtransport'
+    const mod = (await import(pkg)) as { WebTransport?: unknown }
+    // The HTTP/3 binding (@fails-components/webtransport-transport-http3-quiche)
+    // is OPTIONAL: it carries a compile-on-install lifecycle script, so the SDK
+    // never ships it as a dependency (a missing binding must degrade to ws,
+    // never break install). The base package's own `quicheLoaded` promise
+    // RESOLVES undefined on a missing binding (its internal catch swallows the
+    // import failure) and would silently fall back to WebTransport-over-HTTP/2,
+    // which the hub does not serve — probe the binding with our own import and
+    // refuse the rung when it is absent. Apps that want Node QUIC install it.
+    const binding = await import('@fails' + '-components/webtransport-transport-http3-quiche')
+      .then(() => true, () => false)
+    if (!binding) return undefined
+    return mod.WebTransport ?? undefined
+  } catch {
+    return undefined // ponyfill not loadable on this platform: caller falls back
+  }
+}
+
+function isNodeRuntime(): boolean {
+  const env = globalThis as typeof globalThis & { process?: { versions?: { node?: string } } }
+  return typeof env.process?.versions?.node === 'string'
+}
+
 function globalCtor(name: string): unknown {
   // Cross-runtime constructor probe: this package's tsconfig has no DOM/node
   // lib, so globalThis is not typed for WebTransport/RTCPeerConnection.
@@ -185,6 +224,9 @@ export interface WireOptions {
   apiBaseUrl: string
   apiKey: string
   model: string
+  /** Client-chosen sticky id the calls edge requires (?dcid): reconnects
+   * with the same id re-bind to the same member ("first caller binds"). */
+  dcid: string
   /** wss://…/v1/realtime?model=… (the WS dial URL). */
   wsUrl: string
 }
@@ -431,17 +473,20 @@ export class QuicWire implements Wire {
   private closedSent = false
 
   static available(): boolean {
-    return globalCtor('WebTransport') !== undefined
+    // Node has no native WebTransport but the @fails-components ponyfill is a
+    // regular dependency; a failed ponyfill load falls back at dial time.
+    return globalCtor('WebTransport') !== undefined || isNodeRuntime()
   }
 
   constructor(private opts: WireOptions) {}
 
   async connect(): Promise<void> {
-    const WT = globalCtor('WebTransport') as WtCtor | undefined
+    const WT = (globalCtor('WebTransport') as WtCtor | undefined) ??
+      ((await nodePonyfill()) as WtCtor | undefined)
     if (WT === undefined) throw new TransportDialError('no WebTransport implementation on this platform')
 
     const res = await fetch(
-      `${this.opts.apiBaseUrl.replace(/\/+$/, '')}/v1/realtime/calls?model=${encodeURIComponent(this.opts.model)}&transport=quic`,
+      `${this.opts.apiBaseUrl.replace(/\/+$/, '')}/v1/realtime/calls?model=${encodeURIComponent(this.opts.model)}&transport=quic&dcid=${encodeURIComponent(this.opts.dcid)}`,
       // Never replay the bearer key to wherever a redirect points.
       { method: 'POST', headers: { authorization: `Bearer ${this.opts.apiKey}` }, redirect: 'error' },
     )
@@ -555,6 +600,9 @@ export class RtcWire implements Wire {
   private dc: RtcDataChannel | null = null
 
   static available(): boolean {
+    // Browser-only today: Node has no maintained W3C-shaped WebRTC that
+    // interoperates with the lax SFU without compiling on install
+    // (werift evidence above), so Node keeps ws for this rung.
     return globalCtor('RTCPeerConnection') !== undefined
   }
 
@@ -596,7 +644,7 @@ export class RtcWire implements Wire {
 
     await pc.setLocalDescription(await pc.createOffer())
     const res = await fetch(
-      `${this.opts.apiBaseUrl.replace(/\/+$/, '')}/v1/realtime/calls?model=${encodeURIComponent(this.opts.model)}`,
+      `${this.opts.apiBaseUrl.replace(/\/+$/, '')}/v1/realtime/calls?model=${encodeURIComponent(this.opts.model)}&dcid=${encodeURIComponent(this.opts.dcid)}`,
       {
         method: 'POST',
         headers: { authorization: `Bearer ${this.opts.apiKey}`, 'content-type': 'application/sdp' },

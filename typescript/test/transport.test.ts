@@ -85,6 +85,7 @@ const baseOpts: WireOptions = {
   apiKey: "sk-test",
   model: "sense-latest:bf16",
   wsUrl: "wss://inference.urun.sh/v1/realtime?model=sense-latest%3Abf16",
+  dcid: "test-dcid",
 };
 
 // ---------------------------------------------------------------------------
@@ -121,9 +122,14 @@ describe("transportOrder", () => {
     expect(transportOrder("ws")).toEqual(["ws"]);
   });
 
-  test("auto skips missing stacks and always ends with ws", async () => {
+  test("auto dials node ponyfills when globals are missing, always ends with ws", async () => {
     await withCtors({ WebTransport: undefined, RTCPeerConnection: undefined }, () => {
-      expect(transportOrder("auto")).toEqual(["ws"]);
+      // Under Node (this test runner included) neither global exists, but the
+      // @fails-components/webtransport ponyfill is a regular dependency: the
+      // quic rung is still offered (a failed ponyfill load falls back at dial
+      // time). WebRTC stays browser-only (werift interop evidence in
+      // transport.ts). A browser without natives would see only ["ws"] here.
+      expect(transportOrder("auto")).toEqual(["quic", "ws"]);
     });
     await withCtors({ WebTransport: function FakeWT() {}, RTCPeerConnection: undefined }, () => {
       expect(transportOrder("auto")).toEqual(["quic", "ws"]);

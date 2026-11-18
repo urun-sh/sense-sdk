@@ -101,6 +101,7 @@ describe("dial", () => {
       apiKey: "k",
       model: "m",
       wsUrl: "ws://127.0.0.1:1/v1/realtime",
+      dcid: "test-dcid",
     });
     await expect(dial).rejects.toBeDefined();
     await new Promise((r) => setTimeout(r, 100)); // any late 'error' event must stay handled

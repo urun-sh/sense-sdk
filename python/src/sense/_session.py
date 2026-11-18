@@ -15,8 +15,11 @@ import json
 import logging
 import math
 import os
+import random
+import re
 import time
 import urllib.parse
+import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
@@ -74,6 +77,16 @@ MAX_FRAME_BYTES = 256_000
 RETRY_FLOOR_S = 5.0
 RETRY_CAP_S = 30.0
 RETRY_MAX_ATTEMPTS = 600
+
+#: Reconnect pacing for wires that die young (relay/GS churn): the same
+#: ladder the TS SDK runs. A wire that lived resets the ladder; a wire that
+#: dies young backs off (jittered, so co-tenants do not retry in lockstep)
+#: and consecutive young deaths are BOUNDED — past the bound the drive ends
+#: fatally instead of storming the hub with instant redials.
+REDIAL_BASE_S = 1.0
+YOUNG_WIRE_S = 10.0
+MAX_CONSECUTIVE_YOUNG_DEATHS = 10
+
 #: Per-source outbound audio held while the lane is down (~60 s of 40 ms
 #: chunks). Older chunks are dropped first so a long outage cannot grow
 #: memory without bound; stale audio is worthless to a realtime lane.
@@ -91,6 +104,12 @@ MAX_PENDING_TEXT_ITEMS = 256
 #: ruling): only real app sends and ``keepalive()`` count.
 PRESENCE_IDLE_S = 60.0
 PRESENCE_CADENCE_S = 10.0
+
+#: Keepalive event types the SDK itself sends on the realtime lane. An
+#: adapter that rejects one with ``unknown_event`` gets it muted for the
+#: rest of that connection (liveness still comes from audio frames).
+_KEEPALIVE_EVENTS = frozenset({"session.presence", "ping"})
+_UNKNOWN_EVENT_RE = re.compile(r"event type\s+(\S+)\s+is not supported")
 
 __all__ = ["AttachHandle", "Session", "SessionStats"]
 
@@ -233,6 +252,18 @@ class Session:
         self._wave_q: asyncio.Queue = asyncio.Queue(maxsize=512)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._wire: Wire | None = None
+        #: Client-chosen sticky id for /v1/realtime/calls dials (?dcid): stable
+        #: per session so a reconnect re-binds to the same member ("first
+        #: caller binds" — the edge's own contract).
+        self._dcid = uuid.uuid4().hex
+        #: Keepalive event types the current adapter has rejected with
+        #: ``unknown_event`` (per connection; reset on every dial).
+        self._muted_keepalive: set[str] = set()
+        #: Young-death ladder: monotonic time the current wire went live,
+        #: consecutive young deaths, and the next redial delay.
+        self._connected_at: float | None = None
+        self._young_deaths = 0
+        self._redial_delay = 0.0
         self._audio_in = _AudioInput(self)
         self._video_in = _VideoInput(self)
         self._text_in = _TextInput(self)
@@ -563,7 +594,7 @@ class Session:
         try:
             res = await http.post(
                 self._calls_url(),
-                params={"model": self.model, "transport": "quic"},
+                params={"model": self.model, "transport": "quic", "dcid": self._dcid},
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 # Never replay the bearer key to wherever a redirect points.
                 allow_redirects=False,
@@ -600,7 +631,7 @@ class Session:
         http = _http_session()
         wire = RtcWire()
         try:
-            await wire.connect(http, self._calls_url(), self.api_key, self.model)
+            await wire.connect(http, self._calls_url(), self.api_key, self.model, dcid=self._dcid)
             return wire
         except BaseException:
             await asyncio.shield(wire.close())
@@ -780,18 +811,63 @@ class Session:
         """The session's drive: connect, register questions, keep a cadence
         turn open, and assemble waves into ``_wave_q`` (handlers fire in
         :meth:`_accept`). Runs until :meth:`close`; a lane death reconnects
-        fresh, a fatal error (out of credits) ends the drive and surfaces
-        through :meth:`run`."""
+        fresh — paced by the young-death ladder: a wire that lived resets the
+        ladder, a wire that died young backs off (jittered exponential,
+        bounded) and past the bound the drive ends fatally instead of
+        storming the hub; a fatal error (out of credits, the young-death
+        bound) surfaces through :meth:`run`."""
         try:
             while not self._closed:
+                lane_dead = False
                 try:
                     await self._serve_once()
                 except _LaneDead:
-                    log.warning("[sense] session_gone — reconnecting fresh")
+                    lane_dead = True
+                # A connection cycle just ended. A wire that went live and
+                # died within YOUNG_WIRE_S is churn (relay/GS restart, an
+                # adapter refusing us), not a fresh start: back off.
+                young = (
+                    self._connected_at is not None
+                    and time.monotonic() - self._connected_at < YOUNG_WIRE_S
+                )
+                if young:
+                    self._young_deaths += 1
+                    if self._young_deaths >= MAX_CONSECUTIVE_YOUNG_DEATHS:
+                        raise SenseUnavailable(
+                            f"the wire died young {self._young_deaths}x in a row — "
+                            "the session appears ended by the hub"
+                        )
+                    await self._redial_backoff()
+                else:
+                    self._young_deaths = 0
+                    self._redial_delay = 0.0
+                    if lane_dead:
+                        # An old wire's death is an explicit session_gone:
+                        # reconnect immediately, no backoff (TS parity).
+                        log.warning("[sense] session_gone — reconnecting fresh")
         except Exception as exc:
             self._fatal = exc  # surfaces through run(); handlers stop here
         finally:
             await self._reap(sender, presence)
+
+    async def _redial_backoff(self) -> None:
+        """Jittered exponential backoff after a young wire death: base 1 s,
+        doubling, capped at ``RETRY_CAP_S``; jittered so co-tenants do not
+        retry in lockstep."""
+        delay = max(self._redial_delay, REDIAL_BASE_S)
+        self._redial_delay = min(delay * 2, RETRY_CAP_S)
+        delay *= 0.5 + random.random()  # ±50% jitter
+        wire = self._wire
+        code = getattr(wire, "close_code", None)
+        reason = getattr(wire, "close_reason", None)
+        log.warning(
+            "[sense] wire died young (close_code=%s reason=%r, %d in a row) — redialing in %.1fs",
+            code,
+            reason,
+            self._young_deaths,
+            delay,
+        )
+        await asyncio.sleep(delay)
 
     async def _serve_once(self) -> None:
         """One connect → hello → wire-loop cycle. Raises ``_LaneDead`` when
@@ -800,6 +876,8 @@ class Session:
         self._turn_open = False
         wire = await self._connect()
         self._wire = wire
+        self._connected_at = time.monotonic()
+        self._muted_keepalive.clear()  # new connection: the adapter may speak them now
         self._wake_up()  # the sender may hold queued audio
         try:
             await self._hello(wire)
@@ -941,6 +1019,22 @@ class Session:
             return
         if code == "session_gone":
             raise _LaneDead()
+        if code == "unknown_event":
+            # An adapter that doesn't speak our keepalive events rejects each
+            # one once and only once matters: the first rejection mutes that
+            # event type for the rest of the connection. Benign — liveness
+            # still comes from audio frames — so: debug log, no stats.errors,
+            # no turn reopen, and the muted type is never sent again.
+            message = err.get("message") if isinstance(err, dict) else ""
+            match = _UNKNOWN_EVENT_RE.search(str(message))
+            event = match.group(1) if match is not None else None
+            if event is not None and event in _KEEPALIVE_EVENTS:
+                self._muted_keepalive.add(event)
+                log.debug(
+                    "[sense] adapter does not support keepalive event %s; muted for this connection",
+                    event,
+                )
+                return
         if code == "response_in_progress":
             # A cancelled cadence turn the server never settles bricks the
             # lane: every reopened turn is refused with response_in_progress
@@ -976,7 +1070,12 @@ class Session:
         active (inside the idle window); the idle lapse stops the frames."""
         while not self._closed:
             wire = self._wire
-            if wire is not None and not wire.closed and time.monotonic() - self._last_activity < PRESENCE_IDLE_S:
+            if (
+                wire is not None
+                and not wire.closed
+                and "session.presence" not in self._muted_keepalive
+                and time.monotonic() - self._last_activity < PRESENCE_IDLE_S
+            ):
                 try:
                     await self._send(wire, {"type": "session.presence"})
                 except Exception:

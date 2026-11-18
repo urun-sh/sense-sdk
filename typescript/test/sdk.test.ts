@@ -1092,3 +1092,56 @@ describe("session drive (attach starts the session)", () => {
     await s.close();
   });
 });
+
+describe("unknown_event keepalive muting", () => {
+  const PRESENCE_REJECTED = {
+    type: "error",
+    error: { code: "unknown_event", message: "event type session.presence is not supported by this adapter" },
+  };
+
+  test("a presence rejection mutes the type: not counted, never sent again; other errors stay loud", async () => {
+    const wires: FakeWire[] = [];
+    const s = new Session({ apiKey: "sk-test", wireFactory: recordingFactory([], wires) });
+    await s.connect();
+    await drain();
+    const w = wires[0]!;
+    const before = s.stats.errors;
+
+    w.emit(PRESENCE_REJECTED);
+    expect(s.stats.errors).toBe(before); // expected on adapters that don't speak it
+
+    // The muted type is never sent again on this connection.
+    (s as unknown as { presenceTick(): void }).presenceTick();
+    expect(w.sent.some((m) => hasType(m) && m.type === "session.presence")).toBe(false);
+
+    // Any other error stays loud and counted.
+    w.emit({ type: "error", error: { code: "weird", message: "boom" } });
+    expect(s.stats.errors).toBe(before + 1);
+    await s.close();
+  });
+
+  test("the mute resets on the next dial: a new connection sends presence again", async () => {
+    const wires: FakeWire[] = [];
+    const second = Promise.withResolvers<FakeWire>();
+    const factory: WireDialer = () => {
+      const w = new FakeWire();
+      wires.push(w);
+      if (wires.length === 2) second.resolve(w);
+      return Promise.resolve(w as never);
+    };
+    const s = new Session({ apiKey: "sk-test", wireFactory: factory });
+    await s.connect();
+    await drain();
+    wires[0]!.emit(PRESENCE_REJECTED);
+    (s as unknown as { presenceTick(): void }).presenceTick();
+    expect(wires[0]!.sent.some((m) => hasType(m) && m.type === "session.presence")).toBe(false);
+
+    // session_gone redials immediately; the new connection clears the mute.
+    wires[0]!.drop(1011, "session_gone");
+    const w2 = await second.promise;
+    await drain();
+    (s as unknown as { presenceTick(): void }).presenceTick();
+    expect(w2.sent.some((m) => hasType(m) && m.type === "session.presence")).toBe(true);
+    await s.close();
+  });
+});

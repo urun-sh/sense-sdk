@@ -23,10 +23,10 @@ jobs:
       # The core SDK supports 3.10; the terminal demo uses Task.uncancel (3.11+).
       - name: Core SDK on Python 3.10
         if: matrix.python == '3.10'
-        run: uv run --locked --project python --extra quic --extra webrtc pytest python/tests conformance/python_runner.py --ignore=python/tests/test_cheese_demo.py -q
+        run: uv run --locked --project python pytest python/tests conformance/python_runner.py --ignore=python/tests/test_cheese_demo.py -q
       - name: Full SDK and demo suite
         if: matrix.python != '3.10'
-        run: uv run --locked --project python --extra quic --extra webrtc pytest python/tests conformance/python_runner.py -q
+        run: uv run --locked --project python pytest python/tests conformance/python_runner.py -q
   typescript:
     runs-on: ubuntu-latest
     steps:

@@ -12,6 +12,7 @@ import sys
 import types
 
 import pytest
+import sense._session as sess_mod
 from sense import Question, QuestionKind, Session
 from sense._transport import (
     WT_CONTROL_FRAME_MAX,
@@ -250,8 +251,9 @@ def test_event_flow_over_fake_wire_yields_waves():
     assert got[0].result("intent").value == "support"
 
 
-def test_wire_close_reconnects_with_fresh_dial():
+def test_wire_close_reconnects_with_fresh_dial(monkeypatch):
     """When the wire closes mid-run, the session redials with a fresh wire."""
+    monkeypatch.setattr(sess_mod, "REDIAL_BASE_S", 0.001)
     s = make_session()
     s.transport = "quic"
     calls = []
@@ -486,3 +488,43 @@ def test_control_stream_skips_non_dict_message(caplog):
     import msgpack
 
     assert msgpack.unpackb(data[4 : 4 + n]) == {"t": "pong", "id": 3, "ts": 3}
+
+
+def test_ws_wire_accepts_binary_frames():
+    """Prod lax sends server events as BINARY ws frames (first one ~170 ms
+    after the dial). They carry UTF-8 event JSON (the TS SDK stringifies every
+    message buffer) and must NOT end the wire — 0.2.2 killed the wire on the
+    first binary frame and stormed reconnects at ~0.35 s."""
+    import aiohttp
+    from sense._transport import WsWire
+
+    class Msg:
+        def __init__(self, msg_type, data=None, extra=None):
+            self.type, self.data, self.extra = msg_type, data, extra
+
+    frames = iter([
+        Msg(aiohttp.WSMsgType.BINARY, b'{"type":"session.created"}'),
+        Msg(aiohttp.WSMsgType.PING),
+        Msg(aiohttp.WSMsgType.PONG),
+        Msg(aiohttp.WSMsgType.TEXT, '{"type":"response.created"}'),
+        Msg(aiohttp.WSMsgType.CLOSE, extra="done"),
+    ])
+
+    class FakeWs:
+        close_code = 1000
+
+        async def receive(self):
+            return next(frames)
+
+    async def go():
+        wire = WsWire(FakeWs(), None)
+        first = await wire.receive()   # binary frame decodes as event text
+        second = await wire.receive()  # ping/pong are skipped, not closure
+        third = await wire.receive()   # a real CLOSE frame ends the wire
+        return first, second, third, wire
+
+    first, second, third, wire = asyncio.run(go())
+    assert first == '{"type":"session.created"}'
+    assert second == '{"type":"response.created"}'
+    assert third is None
+    assert wire.closed and wire.close_code == 1000 and wire.close_reason == "done"
