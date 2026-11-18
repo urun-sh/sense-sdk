@@ -27,7 +27,7 @@ finished = app.noul("finished", instructions="Did the current speaker just finis
 user_speaking = app.noul("user_speaking", instructions="Is a human speaking right now?")
 intent = app.choice(
     "intent",
-    instructions="What does the user want?",
+    instructions="What does the person want?",
     criteria={"support": "Technical help with the product",
               "sales": "Pricing, plans, buying",
               "other": "Anything else"},
