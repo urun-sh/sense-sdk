@@ -144,7 +144,17 @@ finally:
 ```
 
 ## Next steps
-Beyond this example, the SDK also has `app.when(pred, handler)` for edge-triggered handlers and `app.on_wave(handler)` to observe every completed wave. Refer to the [Sense reference](https://docs.urun.sh/docs/sense/reference?facet=session) for details.
+Beyond this example, the SDK also has decorator handlers — curried on the predicate, returning the function unchanged:
+
+```python
+@app.when(finished & (intent == "support"))
+async def respond(event): ...
+
+@app.on_wave(coalesce=True)
+def observe(event): ...
+```
+
+Refer to the [Sense reference](https://docs.urun.sh/docs/sense/reference?facet=session) for details.
 
 ### Full example code
 
