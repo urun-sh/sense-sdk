@@ -165,6 +165,12 @@ export class Session {
    * keepalive). A freshly created session is present until this lapses. */
   private lastActivityAt = Date.now();
   private presenceTimer: ReturnType<typeof setInterval> | null = null;
+  /** The session drive (dial + turn-open loop): started once, by whichever of
+   * attach()/run() runs first. */
+  private driveStarted = false;
+  private driveWaiters: (() => void)[] = [];
+  /** A dial already in flight; a second connect() joins it instead of double-dialing. */
+  private connecting: Promise<void> | null = null;
 
   constructor(opts: SessionOptions = {}) {
     this.apiKeyProvider = opts.apiKey ?? envVar("URUN_API_KEY") ?? "";
@@ -377,11 +383,23 @@ export class Session {
   }
 
   /** Connect with the §7 dial policy (503/429 → backoff and redial). @internal
-   * — run() dials on first read; tests dial through here. The
+   * — the drive dials at start; tests dial through here. Idempotent: a dial
+   * already in flight is joined, never duplicated. The
    * transport selection (auto: quic → webrtc → ws) happens in the wire
    * factory; a refused dial restarts the whole order. */
   async connect(): Promise<void> {
     if (this.isClosed) throw new ProtocolError("protocol", "session is closed");
+    if (this.connecting) return this.connecting;
+    const dial = this.dial();
+    this.connecting = dial;
+    try {
+      await dial;
+    } finally {
+      if (this.connecting === dial) this.connecting = null;
+    }
+  }
+
+  private async dial(): Promise<void> {
     let delay = 1_000;
     for (let attempt = 1; ; attempt++) {
       try {
@@ -558,6 +576,7 @@ export class Session {
     // waiter parked) must still see the end on its next read.
     this.streamsEnded = true;
     for (const w of this.waveWaiters.splice(0)) w(null);
+    this.wakeDrive();
   }
 
   private onMessage(raw: string): void {
@@ -743,6 +762,7 @@ export class Session {
     while (this.waveWaiters.length && this.waveQueue.length) {
       this.waveWaiters.shift()!(this.waveQueue.shift() as Wave);
     }
+    this.wakeDrive(); // the drive re-evaluates turn-open on wave boundaries, as the run loop did
   }
 
   private nextWave(): Promise<Wave | null | undefined> {
@@ -784,23 +804,69 @@ export class Session {
     );
   }
 
-  /** Async-iterator of waves: THE wave-iteration path. Dials on first read
-   * (never after a close or a terminal end — the stream just ends); input
-   * streams in through attach(). */
+  /** Async-iterator of waves: THE wave-iteration path. Starts the session
+   * drive here or at attach(), whichever runs first — the second is a no-op.
+   * Input streams in through attach(); the drive owns dialing and turn-open. */
   async *run(): AsyncGenerator<Wave> {
-    if (!this.wire && !this.isClosed && !this.streamsEnded) await this.connect();
+    this.ensureDrive();
     for (;;) {
-      // The turn opens on first input: an empty audio commit is
-      // refused and leaves the turn audio-less forever.
-      if (this.shouldOpenTurn()) this.openTurn();
       const wave = await this.nextWave();
       if (wave === null) {
         this.throwIfCreditsFatal();
         return; // stream over
       }
-      if (wave === undefined) continue; // wake: re-check the turn-open
+      if (wave === undefined) continue; // wake: re-check the stream end
       yield wave;
     }
+  }
+
+  /** Start the session drive once: dial, then keep the turn-open loop alive
+   * so turns open and handlers fire whether or not anyone iterates run().
+   * The drive never consumes waves — deliver() queues them for run()
+   * consumers (bounded, drop-oldest) and fires the handlers. */
+  private ensureDrive(): void {
+    if (this.driveStarted || this.isClosed) return;
+    this.driveStarted = true;
+    void this.driveLoop();
+  }
+
+  private async driveLoop(): Promise<void> {
+    try {
+      if (!this.wire && !this.isClosed && !this.streamsEnded) await this.connect();
+      for (;;) {
+        if (this.isClosed || this.streamsEnded) return;
+        // The turn opens on first input: an empty audio commit is
+        // refused and leaves the turn audio-less forever.
+        if (this.shouldOpenTurn()) this.openTurn();
+        await this.driveWait();
+      }
+    } catch (err) {
+      this.endFatal(err);
+    }
+  }
+
+  /** The drive's park: a 250 ms re-evaluation cadence, or an immediate wake
+   * from deliver()/close()/endFatal(). */
+  private driveWait(): Promise<void> {
+    if (this.isClosed || this.streamsEnded) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const i = this.driveWaiters.indexOf(finish);
+        if (i >= 0) this.driveWaiters.splice(i, 1);
+        resolve();
+      };
+      const timer = setTimeout(finish, 250);
+      this.driveWaiters.push(finish);
+    });
+  }
+
+  /** Wake the drive's park immediately (wave delivered, terminal end, close). */
+  private wakeDrive(): void {
+    for (const w of this.driveWaiters.splice(0)) w();
   }
 
   /** THE input path — one call, one sources object: `{ stream?, audio?,
@@ -813,6 +879,7 @@ export class Session {
    * detach() stops everything attached here; a MediaStream's tracks stay
    * owned by the caller. Iterate `run()` to consume the waves. */
   async attach(sources: InputSources, opts?: AttachOptions): Promise<AttachHandle> {
+    this.ensureDrive(); // attach() starts the session: dial + turn-open loop
     let stopped = false;
     const stops: (() => void)[] = [];
     const handle: AttachHandle = {
@@ -840,6 +907,7 @@ export class Session {
   async close(): Promise<void> {
     this.isClosed = true;
     this.stopPresence();
+    this.wakeDrive(); // the drive loop must not park through a close
     for (const w of this.waveWaiters.splice(0)) w(null);
     const wire = this.wire;
     this.wire = null;

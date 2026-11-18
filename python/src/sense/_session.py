@@ -225,6 +225,12 @@ class Session:
         self._out_lock = asyncio.Lock()  # one writer at a time on the wire
         self._turn_open = False
         self._pumps: list[asyncio.Task] = []  # attach()ed input pumps
+        #: The ONE session drive (dial + cadence + wave assembly), started by
+        #: whichever of attach()/run() runs first. Waves land in ``_wave_q``
+        #: for run() consumers; handlers fire in _accept either way.
+        self._drive_task: asyncio.Task | None = None
+        self._fatal: BaseException | None = None
+        self._wave_q: asyncio.Queue = asyncio.Queue(maxsize=512)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._wire: Wire | None = None
         self._audio_in = _AudioInput(self)
@@ -502,6 +508,10 @@ class Session:
                 "attach() needs a running event loop — call it from async code "
                 "(before or during session.run())"
             ) from exc
+        # attach IS starting the session: the drive (dial + cadence + wave
+        # assembly) begins now, so app.when/app.on_wave handlers fire whether
+        # or not anyone iterates run(). Idempotent — run() shares this drive.
+        self._ensure_drive()
         tasks = [
             loop.create_task(self._pump_one(src, push), name=f"sense-attach-{what}")
             for what, src, push in (
@@ -748,49 +758,104 @@ class Session:
 
     # -- the wire loop ----------------------------------------------------------
 
-    async def run(self) -> AsyncIterator[Wave]:
-        """Drive the session: connect, register questions, keep a cadence turn
-        open, assemble waves, and yield them. Stream inputs in with
-        :meth:`attach` — the one canonical input path."""
+    def _ensure_drive(self) -> asyncio.Task | None:
+        """Start the ONE session drive (dial + cadence + wave assembly), unless
+        it is already running or the session is closed. Whoever needs the
+        session alive — :meth:`attach` (so handlers fire without a run loop)
+        or :meth:`run` (the wave iterator) — starts it; the second caller is a
+        no-op. Waves land in ``_wave_q``; handlers fire in :meth:`_accept`
+        either way."""
+        if self._drive_task is not None or self._closed:
+            return self._drive_task
         self._wake = asyncio.Event()
         self._loop = asyncio.get_running_loop()
-        sender = asyncio.create_task(self._sender())
-        presence = asyncio.create_task(self._presence_loop())
+        sender = self._loop.create_task(self._sender())
+        presence = self._loop.create_task(self._presence_loop())
+        self._drive_task = self._loop.create_task(
+            self._drive(sender, presence), name="sense-drive"
+        )
+        return self._drive_task
+
+    async def _drive(self, sender: asyncio.Task, presence: asyncio.Task) -> None:
+        """The session's drive: connect, register questions, keep a cadence
+        turn open, and assemble waves into ``_wave_q`` (handlers fire in
+        :meth:`_accept`). Runs until :meth:`close`; a lane death reconnects
+        fresh, a fatal error (out of credits) ends the drive and surfaces
+        through :meth:`run`."""
         try:
             while not self._closed:
-                self._turn_open = False
-                wire = await self._connect()
-                self._wire = wire
-                self._wake_up()  # the sender may hold queued audio
                 try:
-                    await self._hello(wire)
-                    asm = WaveAssembler(self.questions)
-                    asm.on_decision = self._count_decision
-                    self._line_buf = ""
-                    async for wave in self._run_wire_loop(asm, wire):
-                        yield wave
-                except asyncio.CancelledError:
-                    raise
+                    await self._serve_once()
                 except _LaneDead:
                     log.warning("[sense] session_gone — reconnecting fresh")
-                finally:
-                    self._wire = None
-                    try:
-                        await wire.close()
-                    except Exception:
-                        pass
+        except Exception as exc:
+            self._fatal = exc  # surfaces through run(); handlers stop here
         finally:
-            pumps, self._pumps = self._pumps, []
-            for t in pumps:
-                t.cancel()
-            sender.cancel()
-            presence.cancel()
-            self._wake = None
-            for t in [*pumps, sender, presence]:
-                try:
-                    await t
-                except (asyncio.CancelledError, Exception):
-                    pass
+            await self._reap(sender, presence)
+
+    async def _serve_once(self) -> None:
+        """One connect → hello → wire-loop cycle. Raises ``_LaneDead`` when
+        the session is gone (the drive reconnects fresh); any other error
+        escapes to :meth:`_drive` as fatal."""
+        self._turn_open = False
+        wire = await self._connect()
+        self._wire = wire
+        self._wake_up()  # the sender may hold queued audio
+        try:
+            await self._hello(wire)
+            asm = WaveAssembler(self.questions)
+            asm.on_decision = self._count_decision
+            self._line_buf = ""
+            async for wave in self._run_wire_loop(asm, wire):
+                self._queue_wave(wave)
+        finally:
+            self._wire = None
+            try:
+                await wire.close()
+            except Exception:
+                pass
+
+    async def _reap(self, sender: asyncio.Task, presence: asyncio.Task) -> None:
+        """Cancel and settle the drive's support tasks, then send the queue
+        sentinel that ends any run() consumer."""
+        pumps, self._pumps = self._pumps, []
+        for t in pumps:
+            t.cancel()
+        sender.cancel()
+        presence.cancel()
+        self._wake = None
+        for t in [*pumps, sender, presence]:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._queue_wave(None)  # sentinel: end any run() consumer
+
+    def _queue_wave(self, wave: Wave | None) -> None:
+        """Hand a wave to run() consumers (drop-oldest at 512); ``None`` is
+        the end sentinel. Handlers have already fired in :meth:`_accept`."""
+        if self._wave_q.full():
+            try:
+                self._wave_q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        self._wave_q.put_nowait(wave)
+
+    async def run(self) -> AsyncIterator[Wave]:
+        """Iterate the session's waves. Starts the ONE session drive if
+        :meth:`attach` has not already (attach starts it too, so handler-only
+        apps never need run(); whoever is first dials). Stream inputs in with
+        :meth:`attach` — the one canonical input path."""
+        if self._closed:
+            return
+        self._ensure_drive()
+        while True:
+            wave = await self._wave_q.get()
+            if wave is None:
+                if self._fatal is not None:
+                    raise self._fatal
+                return
+            yield wave
 
     async def _run_wire_loop(self, asm: WaveAssembler, wire) -> AsyncIterator[Wave]:
         """Consume wire messages until the lane ends; yield assembled waves."""
@@ -926,6 +991,9 @@ class Session:
         pumps, self._pumps = self._pumps, []
         for t in pumps:
             t.cancel()
+        drive, self._drive_task = self._drive_task, None
+        if drive is not None:
+            drive.cancel()
         for key in list(self._ctx._tasks):
             self._ctx.cancel(key, barge_in=False)
         wake = self._wake
@@ -936,4 +1004,11 @@ class Session:
             try:
                 await wire.close()
             except Exception:
+                pass
+        if drive is not None:
+            # The drive's own finally reaps pumps/sender/presence and sends
+            # the queue sentinel; await it so nothing outlives close().
+            try:
+                await drive
+            except (asyncio.CancelledError, Exception):
                 pass

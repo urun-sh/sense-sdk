@@ -2,7 +2,7 @@
 
 Python and TypeScript SDKs for uRun's realtime decision model — Sense.
 
-Sense is a *realtime*, *multi-modal* System One model for voice and video agents and was inspired by the Jev model. It runs on continuously streaming media and answers questions about the input many times per second: for example, whether the user is still speaking or done, whether an interruption is a new question or just an "mmmhmm", and what the user's emotional state is.
+Sense is a *realtime*, *multi-modal* System One model for voice and video agents and was inspired by the Jev model. It runs on continuously streaming media and answers questions about the input many times per second: for example, whether the person is still speaking or done, whether an interruption is a new question or just an "mmmhmm", and what the person's emotional state is.
 
 The Sense SDK gives you one unified surface for perception, decision-making, and reactive agent control.
 
@@ -112,7 +112,7 @@ kind = app.choice(
 )
 ```
 
-If you want an ordered scale use a `score` — `criteria` is an ordered array of level descriptions, low end first (2..10), in this case the user's feeling will be graded in the range (0..4):
+If you want an ordered scale use a `score` — `criteria` is an ordered array of level descriptions, low end first (2..10), in this case the person's feeling will be graded in the range (0..4):
 
 ```python
 feeling = app.score(
@@ -127,7 +127,7 @@ and yields `waves`. A wave is a batch of decisions taken over the last slice of 
 
 ```python
 session = app.session()
-waves = session.run()  # returns async iterator
+waves = session.run()  # returns async iterator; iterates the one session drive that attach() or run() starts
 
 
 async def read_waves(waves):
@@ -135,16 +135,16 @@ async def read_waves(waves):
         ...
 ```
 
-**Stream inputs with `session.attach(...)`.** The SDK currently speaks 24 kHz PCM16 mono in 40 ms chunks. `attach` is the one canonical way to stream inputs: it pumps your sources (async iterables, sync iterables, or zero-arg callables — `None` ends) while the wave loop consumes decisions:
+**Stream inputs with `session.attach(...)` — it starts the session.** The SDK currently speaks 24 kHz PCM16 mono in 40 ms chunks. `attach` is the one canonical way to stream inputs: it pumps your sources (async iterables, sync iterables, or zero-arg callables — `None` ends) and starts the session drive (dial + cadence + wave assembly), so `app.when`/`app.on_wave` handlers fire whether or not anyone iterates `run()`:
 
 ```python
 session.attach(audio=mic.chunks())  # PCM16, mono, 24 kHz; one 40 ms block
 await asyncio.gather(read_waves(waves))
 ```
 
-Audio pushes and wave consumption must both make progress — a blocking wave loop starves the audio. `attach` starts the pumps for you (before or during `run()`); `detach()` on the returned handle stops them, and the session closing stops them too.
+Audio pushes and wave consumption must both make progress — a blocking wave loop starves the audio. `attach` starts the session and the pumps; `detach()` on the returned handle stops the pumps (the session keeps running — close it with `session.close()`).
 
-**Where does a live mic come from (Python)?** There is no capture built into the core SDK — keep it dependency-free. Produce PCM16 mono 24 kHz chunks yourself (read a WAV, or use whatever capture library your app already has — e.g. a `sounddevice` raw stream at 24 kHz) and pass the iterator to `session.attach(audio=...)`. For a browser mic with zero plumbing, use the TypeScript SDK's one-liner: `session.attach(await navigator.mediaDevices.getUserMedia({ audio: true }))`.
+**Where does a live mic come from (Python)?** There is no capture built into the core SDK — keep it dependency-free. Produce PCM16 mono 24 kHz chunks yourself (read a WAV, or use whatever capture library your app already has — e.g. a `sounddevice` raw stream at 24 kHz) and pass the iterator to `session.attach(audio=...)`. For a browser mic with zero plumbing, use the TypeScript SDK's one-liner: `session.attach({ stream: await navigator.mediaDevices.getUserMedia({ audio: true }) })`.
 
 **Read decisions off each wave.** Every answered question `name` has a `result` with a `.value`, and a confidence/probability `.p`. Additionally:
 - Choices return confidences for each option in `.p_option(name)`(normalized so they form a discrete probability distribution).
@@ -219,7 +219,7 @@ const kind = app.choice(
 );
 ```
 
-If you want an ordered scale use a `score` — `criteria` is an ordered array of level descriptions, low end first (2..10), in this case the user's feeling will be graded in the range (0..4):
+If you want an ordered scale use a `score` — `criteria` is an ordered array of level descriptions, low end first (2..10), in this case the person's feeling will be graded in the range (0..4):
 
 ```ts
 const feeling = app.score("feeling", {
@@ -233,7 +233,7 @@ and yields `waves`. A wave is a batch of decisions taken over the last slice of 
 
 ```ts
 const session = app.session();
-const waves = session.run(); // returns async iterator; dials on first read
+const waves = session.run(); // returns async iterator; iterates the one session drive that attach() or run() starts
 
 async function readWaves(): Promise<void> {
     for await (const wave of waves) { // iterations can throw if Sense is unreachable
