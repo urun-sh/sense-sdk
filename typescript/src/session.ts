@@ -468,6 +468,7 @@ export class Session {
       throw new ProtocolError("protocol", "session closed while connecting");
     }
     this.wire = wire;
+    this.wdbg(`wire installed kind=${wire.kind}`);
     this.connectedAt = Date.now();
     this.streamsEnded = false;
     this.wedgeRefusals = 0;
@@ -601,6 +602,7 @@ export class Session {
   }
 
   private onMessage(raw: string): void {
+    if (this.wdbgCount <= 3) this.wdbg(`onMessage raw first80=${raw.slice(0, 80)}`);
     let msg: Record<string, unknown>;
     try {
       msg = JSON.parse(raw) as Record<string, unknown>;
@@ -636,8 +638,21 @@ export class Session {
     return false;
   }
 
+  /** Wave-assembly debugging, same opt-in as the wire frame log. */
+  private wdbgCount = 0;
+  private wdbg(msg: string): void {
+    const g = globalThis as typeof globalThis & { __SENSE_WIRE_DEBUG?: boolean }
+    if (g.__SENSE_WIRE_DEBUG !== true) return
+    console.log(`[sense-session ${new Date().toISOString()}] ${msg}`)
+  }
+
   private onDeltaMessage(msg: Record<string, unknown>): void {
-    for (const line of String(msg.delta ?? "").split("\n")) this.onDecisionLine(line);
+    for (const line of String(msg.delta ?? "").split("\n")) {
+      this.wdbgCount++;
+      if (this.wdbgCount <= 2) this.wdbg(`delta#${this.wdbgCount} first120=${line.slice(0, 120)}`);
+      else if (this.wdbgCount % 500 === 0) this.wdbg(`delta#${this.wdbgCount}`);
+      this.onDecisionLine(line);
+    }
   }
 
   private onTurnCompleted(): void {

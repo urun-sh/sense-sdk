@@ -22,10 +22,11 @@ import { errMessage, OutOfCreditsError } from './errors.ts'
 export type Transport = 'auto' | 'quic' | 'webrtc' | 'ws'
 
 export const TRANSPORT_DIAL_TIMEOUT_MS: Record<'quic' | 'webrtc', number> = {
-  quic: 5_000, // UDP blocked ⇒ QUIC never completes; still fast. 2 s was tighter than
-  // the whole POST→WT-ready→hello-ack dance through the console's same-origin
-  // relay (1.2–1.8 s direct, 2026-11-15; the relay hop adds its own fetch),
-  // so prod fell back off a rung that would have connected.
+  quic: 15_000, // the calls POST queues through the pool like the webrtc lane
+  // (3–6.6 s direct at prod lax 2026-11-18, 17 s under load) and THEN the
+  // WT handshake + hello-ack race it — 5 s expired mid-POST repeatedly, both
+  // in Node (ponyfill) and Chrome. Still bounded: a UDP-blocked network
+  // fails here, never hangs.
   webrtc: 30_000, // the calls POST queues through the pool like the WS lane
   // (observed up to 17 s at prod lax 2026-11-18) + ICE gather + DTLS +
   // datachannel open — 10 s expired with the channel milliseconds away
@@ -110,6 +111,10 @@ interface WtSession {
   closed: Promise<void>
   createBidirectionalStream(): Promise<WtBidirectionalStream>
   close(): void
+  /** Diagnostic-only (WHATWG WebTransport): watched when wire debugging is
+   * on so server-initiated unidi streams/datagrams are never silently lost. */
+  incomingUnidirectionalStreams?: { getReader(): { read(): Promise<{ value: unknown; done: boolean }> } }
+  datagrams?: { readable?: { getReader(): { read(): Promise<{ value: Uint8Array | undefined; done: boolean }> } } }
 }
 
 /** `new WebTransport(url, { serverCertificateHashes })` (WHATWG WebTransport). */
@@ -131,7 +136,7 @@ interface RtcPeerConnection {
   connectionState: 'new' | 'connecting' | 'connected' | 'disconnected' | 'failed' | 'closed'
   iceConnectionState: string
   localDescription: { sdp: string } | null
-  createDataChannel(label: string): RtcDataChannel
+  createDataChannel(label: string, init?: { negotiated?: boolean; id?: number }): RtcDataChannel
   addTransceiver(kind: 'audio' | 'video', init: { direction: 'sendonly' | 'recvonly' | 'sendrecv' | 'inactive' }): unknown
   createOffer(): Promise<{ type: 'offer'; sdp: string }>
   setLocalDescription(desc: { type: string; sdp: string }): Promise<void>
@@ -441,6 +446,34 @@ async function webSocketImpl(): Promise<WsCtor> {
 // QUIC / WebTransport
 // ---------------------------------------------------------------------------
 
+/** Frame-level wire debugging, opt-in via `globalThis.__SENSE_WIRE_DEBUG`
+ * (or SENSE_WIRE_DEBUG=1 on Node): logs every event line both directions
+ * with type + size, the dial phase timings, and anything arriving on
+ * server-initiated unidi streams or datagrams (which the wire otherwise
+ * never reads — silence there must be observable, not assumed). */
+function wdbg(msg: string): void {
+  const g = globalThis as typeof globalThis & {
+    __SENSE_WIRE_DEBUG?: boolean
+    process?: { env?: Record<string, string | undefined> }
+  }
+  const on = g.__SENSE_WIRE_DEBUG === true || g.process?.env?.SENSE_WIRE_DEBUG === '1'
+  if (!on) return
+  console.log(`[sense-wire ${new Date().toISOString()}] ${msg}`)
+}
+
+function wireType(raw: string): string {
+  try {
+    const ev: unknown = JSON.parse(raw)
+    if (typeof ev === 'object' && ev !== null && 'type' in ev) {
+      const t: unknown = ev.type
+      return typeof t === 'string' ? t : '?'
+    }
+    return '?'
+  } catch {
+    return 'unparseable'
+  }
+}
+
 interface CallsAnswer {
   callId: string
   url: string
@@ -495,12 +528,44 @@ export class QuicWire implements Wire {
       throw new TransportDialError(`POST /v1/realtime/calls?transport=quic -> ${res.status}: ${(await res.text()).slice(0, 200)}`)
     }
     const answer = parseCallsAnswer(await res.json())
+    const t0 = Date.now()
+    wdbg(`dial POST 201 callId=${answer.callId} url=${answer.url}`)
 
     const wt = new WT(answer.url, {
       serverCertificateHashes: answer.certHashes.map((h) => ({ algorithm: 'sha-256' as const, value: hashToBytes(h) })),
     })
     this.wt = wt
     await wt.ready
+    wdbg(`wt.ready in ${Date.now() - t0}ms`)
+
+    // Diagnostic: server-initiated unidi streams and datagrams are never read
+    // by the wire; when debugging is on, prove silence instead of assuming it.
+    if (wt.incomingUnidirectionalStreams) {
+      void (async () => {
+        const reader = wt.incomingUnidirectionalStreams!.getReader()
+        let n = 0
+        for (;;) {
+          const { value, done } = await reader.read()
+          if (done) return
+          n++
+          wdbg(`server unidi stream #${n} opened`)
+          void value // (ReadableStream) content intentionally unconsumed; counting is the point
+        }
+      })().catch(() => undefined)
+    }
+    if (wt.datagrams?.readable) {
+      void (async () => {
+        const reader = wt.datagrams!.readable!.getReader()
+        let n = 0, bytes = 0
+        for (;;) {
+          const { value, done } = await reader.read()
+          if (done) return
+          n++
+          bytes += value?.byteLength ?? 0
+          if (n <= 5) wdbg(`datagram #${n} ${value?.byteLength ?? 0}B hex=${Array.from((value ?? new Uint8Array()).subarray(0, 16)).map((b) => b.toString(16).padStart(2, '0')).join('')}`)
+        }
+      })().catch(() => undefined)
+    }
 
     // canonical control dance: msgpack hello {token, sessionId} → hello-ack
     const ctrl = await wt.createBidirectionalStream()
@@ -516,10 +581,14 @@ export class QuicWire implements Wire {
         for (const msg of decoder.push(value!)) {
           if (msg.t === 'hello-ack') {
             helloAcked.resolve()
+            wdbg(`hello-ack at +${Date.now() - t0}ms since dial POST`)
           } else if (msg.t === 'ping') {
             // u64 ping ids ride through as Numbers (exact < 2^53);
             // byte-mirror the msgpack body if a gateway ever checks wider ids.
             await ctrlWriter.write(encodeWtControlFrame({ t: 'pong', ts: msg.ts ?? 0, id: msg.id ?? 0 }))
+            wdbg(`control S→C ping → pong id=${msg.id ?? 0}`)
+          } else {
+            wdbg(`control S→C t=${msg.t}`)
           }
         }
       }
@@ -533,6 +602,7 @@ export class QuicWire implements Wire {
     // events stream: NDJSON, both directions, exact OpenAI JSON
     const events = await wt.createBidirectionalStream()
     this.writer = events.writable.getWriter()
+    wdbg(`events stream open at +${Date.now() - t0}ms`)
     const pumpEvents = async (): Promise<void> => {
       const reader = events.readable.getReader()
       const decoder = new TextDecoder()
@@ -540,6 +610,7 @@ export class QuicWire implements Wire {
         const { value, done } = await reader.read()
         if (done) break
         for (const line of this.splitter.push(decoder.decode(value, { stream: true }))) {
+          wdbg(`S→C ${wireType(line)} ${line.length}B`)
           this.messageCb?.(line)
         }
         if (this.splitter.overflowed) {
@@ -566,8 +637,10 @@ export class QuicWire implements Wire {
 
   sendJson(obj: unknown): void {
     if (this.writer === null || this.closedSent) throw new TransportDialError('quic wire closed')
+    const line = JSON.stringify(obj)
+    wdbg(`C→S ${wireType(line)} ${line.length}B`)
     // Writes are not awaited, so this send path does not apply backpressure.
-    this.writer.write(new TextEncoder().encode(JSON.stringify(obj) + '\n')).catch(() => this.signalClosed())
+    this.writer.write(new TextEncoder().encode(line + '\n')).catch(() => this.signalClosed())
   }
 
   onMessage(cb: (raw: string) => void): void {
@@ -615,7 +688,10 @@ export class RtcWire implements Wire {
     // No STUN/TURN: the SFU is reached via host candidates on its announced ports.
     const pc = new RTCP({ iceServers: [] })
     this.pc = pc
-    const dc = pc.createDataChannel('oai-events')
+    // The SFU writes server events as raw JSON on SCTP stream 0 with no DCEP
+    // handshake: a client-DCEP channel never receives them. A negotiated id-0
+    // channel registers stream 0 directly (same fix as the Python SDK).
+    const dc = pc.createDataChannel('oai-events', { negotiated: true, id: 0 })
     this.dc = dc
     // The SDK's media rides the event channel as JSON; the audio m-line exists
     // so the SFU's sendrecv merge can answer. It must be sendrecv: the media
@@ -636,6 +712,7 @@ export class RtcWire implements Wire {
         return
       }
       this.messageCb?.(typeof data === 'string' ? data : new TextDecoder().decode(data as ArrayBuffer))
+      if (typeof data === 'string') wdbg(`S→C ${wireType(data)} ${data.length}B`)
     }
     dc.onclose = () => this.closeCb?.()
     pc.onconnectionstatechange = () => {
@@ -680,7 +757,9 @@ export class RtcWire implements Wire {
 
   sendJson(obj: unknown): void {
     if (this.dc === null || this.dc.readyState !== 'open') throw new TransportDialError('webrtc wire closed')
-    this.dc.send(JSON.stringify(obj))
+    const line = JSON.stringify(obj)
+    wdbg(`C→S ${wireType(line)} ${line.length}B`)
+    this.dc.send(line)
   }
 
   onMessage(cb: (raw: string) => void): void {
