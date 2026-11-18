@@ -1,19 +1,24 @@
 [project]
 name = "urun-sense"
-version = "0.2.2"
+version = "0.2.3"
 description = "Python SDK for the Sense realtime decision protocol"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Urun Platform, Inc" }]
 requires-python = ">=3.10"
-dependencies = ["aiohttp>=3.9", "truststore>=0.10"]
+dependencies = [
+    "aiohttp>=3.9",
+    "truststore>=0.10",
+    # QUIC (WebTransport) and WebRTC ship with the base install: `pip install
+    # urun-sense` must be able to dial every transport (auto order quic ->
+    # webrtc -> ws) with no extras.
+    "aioquic>=1.2",
+    "msgpack>=1.0",
+    "aiortc>=1.9",
+]
 
 [project.optional-dependencies]
-# Transport extras: the core wire is WebSocket; QUIC (WebTransport) and
-# WebRTC are opt-in and feature-detected at dial time.
-quic = ["aioquic>=1.2", "msgpack>=1.0"]
-webrtc = ["aiortc>=1.9"]
 # Everything the shipped cheese demo needs beyond the SDK itself.
 demo = ["rich>=13", 'sounddevice>=0.5; sys_platform != "linux"']
 

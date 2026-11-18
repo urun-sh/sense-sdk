@@ -30,7 +30,7 @@ All transports carry the same JSON application events, including media:
 
 The QUIC control stream uses a four-byte little-endian body length followed by MessagePack. The client sends `hello` with `token` and `sessionId`, waits for `hello-ack`, and answers `ping` with `pong`. Control frames are limited to 256 KiB. Python verifies the peer certificate against the hashes returned by the authenticated setup request before sending application data; TypeScript passes the supplied hashes to WebTransport.
 
-Python's QUIC and WebRTC dependencies are optional extras (`urun-sense[quic]` and `urun-sense[webrtc]`). TypeScript detects WebTransport and RTCPeerConnection availability at runtime. Its WebSocket implementation requires header authentication and does not support browser WebSocket fallback. These transport options do not imply that every runtime supports every SDK entry point.
+Python's QUIC and WebRTC dependencies ship with the base install (`pip install urun-sense`); the auto transport order (quic → webrtc → ws) needs no extras. TypeScript detects WebTransport and RTCPeerConnection availability at runtime. Its WebSocket implementation requires header authentication and does not support browser WebSocket fallback. These transport options do not imply that every runtime supports every SDK entry point.
 
 ## 2. Handshake and question registration
 

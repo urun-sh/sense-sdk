@@ -13,6 +13,7 @@ import types
 
 import pytest
 from sense import Question, QuestionKind, Session
+import sense._session as sess_mod
 from sense._transport import (
     WT_CONTROL_FRAME_MAX,
     QuicWire,
@@ -250,8 +251,9 @@ def test_event_flow_over_fake_wire_yields_waves():
     assert got[0].result("intent").value == "support"
 
 
-def test_wire_close_reconnects_with_fresh_dial():
+def test_wire_close_reconnects_with_fresh_dial(monkeypatch):
     """When the wire closes mid-run, the session redials with a fresh wire."""
+    monkeypatch.setattr(sess_mod, "REDIAL_BASE_S", 0.001)
     s = make_session()
     s.transport = "quic"
     calls = []

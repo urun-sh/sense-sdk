@@ -7,7 +7,8 @@ import json
 
 import pytest
 from aiohttp import WSMsgType, web
-from sense import OutOfCreditsError, Sense
+import sense._session as sess_mod
+from sense import OutOfCreditsError, Sense, SenseUnavailable
 
 
 def dec(qid, t_ms, choice, probs, conf):
@@ -267,3 +268,37 @@ def test_fatal_error_surfaces_through_run():
 async def _consume_all(session):
     async for _w in session.run():
         pass
+
+
+def test_young_wire_deaths_back_off_and_give_up(monkeypatch):
+    """A wire that dies young backs off between redials — never an instant
+    reconnect storm — and the drive ends fatally after the bound."""
+
+    async def go():
+        monkeypatch.setattr(sess_mod, "YOUNG_WIRE_S", 5.0)
+        monkeypatch.setattr(sess_mod, "REDIAL_BASE_S", 0.05)
+        monkeypatch.setattr(sess_mod, "RETRY_CAP_S", 0.2)
+
+        async def handler(request):
+            state["dials"] += 1
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.close()  # die instantly: a young death every time
+            return ws
+
+        state = {"dials": 0}
+        runner, port = await _start_fake(handler)
+        session = None
+        try:
+            app = _app(port)
+            session = app.session()
+            with pytest.raises(SenseUnavailable):
+                async for _wave in session.run():
+                    pass  # no waves ever: the lane dies young every time
+            assert state["dials"] == sess_mod.MAX_CONSECUTIVE_YOUNG_DEATHS
+        finally:
+            if session is not None:
+                await session.close()
+            await runner.cleanup()
+
+    asyncio.run(go())
