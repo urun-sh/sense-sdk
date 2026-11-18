@@ -803,17 +803,38 @@ export class Session {
     }
   }
 
-  /** THE input path: stream a live browser MediaStream (mic and/or camera,
-   * resampled to PCM16 24 kHz mono audio + JPEG video at the session cadence)
-   * or programmatic sources — `{ audio?, video?, text? }`, each an async
-   * iterable, a sync iterable, or a zero-arg callable returning the next
-   * chunk (null/undefined ends it). Audio chunks are PCM16 24 kHz mono bytes,
-   * video chunks are JPEG bytes, text chunks are strings appended to the
-   * transcript. Returns a handle with stop(); a MediaStream's tracks stay
+  /** THE input path — one call, one sources object: `{ stream?, audio?,
+   * video?, text? }`. `stream` is a live browser MediaStream (mic and/or
+   * camera, resampled to PCM16 24 kHz mono audio + JPEG video at the session
+   * cadence); audio chunks are PCM16 24 kHz mono bytes, video chunks are JPEG
+   * bytes, text chunks are strings appended to the transcript — each source
+   * is an async iterable, a sync iterable, or a zero-arg callable returning
+   * the next chunk (null/undefined ends it). Returns a handle whose
+   * detach() stops everything attached here; a MediaStream's tracks stay
    * owned by the caller. Iterate `run()` to consume the waves. */
-  attach(target: AttachStream | InputSources, opts?: AttachOptions): Promise<AttachHandle> {
-    if (isAttachStream(target)) return attachStream(this, target, opts);
-    return attachSources(this, target);
+  async attach(sources: InputSources, opts?: AttachOptions): Promise<AttachHandle> {
+    let stopped = false;
+    const stops: (() => void)[] = [];
+    const handle: AttachHandle = {
+      detach: () => {
+        stopped = true;
+        for (const stop of stops.splice(0)) stop();
+      },
+    };
+    if (sources.stream !== undefined) {
+      const media = await attachStream(this, sources.stream, opts);
+      stops.push(() => media.detach());
+    }
+    for (const kind of ["audio", "video", "text"] as const) {
+      const src = sources[kind];
+      if (src === undefined || src === null) continue;
+      const pump = pumpSource(this, kind, src, () => stopped);
+      stops.push(pump.return);
+      void pump.done.catch((err: unknown) =>
+        console.error(`[sense] ${kind} input pump failed: ${errMessage(err)}`),
+      );
+    }
+    return handle;
   }
 
   async close(): Promise<void> {
@@ -833,41 +854,18 @@ export type InputStreamSource =
   | Iterable<unknown>
   | (() => unknown | null | undefined | Promise<unknown | null | undefined>);
 
-/** Programmatic attach sources. Audio chunks are PCM16 24 kHz mono bytes,
- * video chunks are JPEG bytes, text chunks are strings appended to the
- * transcript (append mode). */
+/** Attach sources — one call, one object. `stream` is the live browser
+ * MediaStream path; the rest are programmatic pumps: audio chunks are
+ * PCM16 24 kHz mono bytes, video chunks are JPEG bytes, text chunks are
+ * strings appended to the transcript (append mode). */
 export interface InputSources {
+  stream?: AttachStream;
   audio?: InputStreamSource;
   video?: InputStreamSource;
   text?: InputStreamSource;
 }
 
 type TextMode = "append" | "replace" | "event";
-
-function isAttachStream(t: AttachStream | InputSources): t is AttachStream {
-  return typeof (t as AttachStream).getAudioTracks === "function";
-}
-
-/** Background pumps for programmatic attach sources; no run loop involved. */
-async function attachSources(session: Session, sources: InputSources): Promise<AttachHandle> {
-  let stopped = false;
-  const stops: (() => void)[] = [];
-  for (const kind of ["audio", "video", "text"] as const) {
-    const src = sources[kind];
-    if (src === undefined || src === null) continue;
-    const pump = pumpSource(session, kind, src, () => stopped);
-    stops.push(pump.return);
-    void pump.done.catch((err: unknown) =>
-      console.error(`[sense] ${kind} input pump failed: ${errMessage(err)}`),
-    );
-  }
-  return {
-    stop: () => {
-      stopped = true;
-      for (const stop of stops.splice(0)) stop();
-    },
-  };
-}
 
 function pumpSource(
   session: Session,

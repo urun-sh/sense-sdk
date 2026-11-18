@@ -242,12 +242,12 @@ async function readWaves(): Promise<void> {
 }
 ```
 
-**Live mic in one line (browser).** `session.attach(stream)` takes a browser MediaStream and does the capture for you — audio is resampled to PCM16 24 kHz mono and pushed in 40 ms chunks, video frames are sampled to JPEG at the session cadence:
+**Live mic in one line (browser).** `session.attach({ stream })` takes a browser MediaStream and does the capture for you — audio is resampled to PCM16 24 kHz mono and pushed in 40 ms chunks, video frames are sampled to JPEG at the session cadence:
 
 ```ts
 const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true }); // audio-only streams work too
-const attached = await session.attach(stream); // resamples + pushes continuously; returns a handle with stop()
-// later: attached.stop() — stops the pumping; the stream's tracks stay yours to stop
+const attached = await session.attach({ stream }); // resamples + pushes continuously; returns a handle with detach()
+// later: attached.detach() — stops the pumping; the stream's tracks stay yours to stop
 ```
 
 **Programmatic sources (server/Node).** attach is the ONE input path: instead of a MediaStream, pass a sources object `{ audio?, video?, text? }` — each an async iterable, a sync iterable, or a zero-arg callable returning the next chunk (null ends it). Audio chunks are PCM16 24 kHz mono bytes, video chunks are JPEG bytes, text chunks are strings appended to the transcript:
@@ -274,7 +274,7 @@ const app = new Sense({
 });
 const session = app.session();
 const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-const attached = await session.attach(stream); // the one-liner above, now unattended
+const attached = await session.attach({ stream }); // the one-liner above, now unattended
 ```
 
 **Read decisions off each wave.** Every answered question `name` has a `result` with a `.value`, and a confidence/probability `.p`. Additionally:
@@ -304,7 +304,7 @@ if (detection.p >= 0.6) {
 try {
     await Promise.race([readWaves(), micEnded]); // first to finish: mic end or wire death
 } finally {
-    attached.stop(); // stops the attach pumps; the stream's tracks stay yours to stop
+    attached.detach(); // stops the attach pumps; the stream's tracks stay yours to stop
     await session.close();
 }
 ```

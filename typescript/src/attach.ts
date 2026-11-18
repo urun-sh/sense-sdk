@@ -1,4 +1,4 @@
-/** `session.attach(stream)` — one call to stream a live mic (and camera)
+/** `session.attach({ stream })` — one call to stream a live mic (and camera)
  * into a session. Ported from the console's realtime playground. */
 import { toB64 } from "./bytes.ts";
 import { JPEG_QUALITIES, PCM_WORKLET_SOURCE, VIDEO_MAX_BYTES, VIDEO_TARGET_WIDTH } from "./media.ts";
@@ -21,9 +21,9 @@ export interface AttachTarget {
 }
 
 export interface AttachHandle {
-  /** Stop sampling and pushing. Does NOT stop the stream's tracks — the
-   * caller owns them (stop them yourself to turn the mic light off). */
-  stop(): void;
+  /** Detach: stop sampling and pushing. Does NOT stop the stream's tracks —
+   * the caller owns them (stop them yourself to turn the mic light off). */
+  detach(): void;
 }
 
 // --- structural browser-API views (DOM lib types are not a dependency) -----
@@ -90,7 +90,7 @@ export async function attachStream(
   const stops: (() => void)[] = [];
   let stopped = false;
   const handle: AttachHandle = {
-    stop() {
+    detach() {
       if (stopped) return;
       stopped = true;
       for (let i = stops.length - 1; i >= 0; i--) stops[i]!();
@@ -103,7 +103,7 @@ export async function attachStream(
     const Ctor = g.AudioContext as (new (opts: { sampleRate: number }) => AudioContextLike) | undefined;
     if (!opts.audioContext && !Ctor) {
       throw new Error(
-        "session.attach(stream) is browser-only (AudioContext not available). " +
+        "session.attach({ stream }) is browser-only (AudioContext not available). " +
           "In Node, stream PCM16 24 kHz mono chunks yourself: session.attach({ audio: chunks }).",
       );
     }

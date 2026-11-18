@@ -104,12 +104,12 @@ async function readWaves(): Promise<void> {
 }
 ```
 
-**Stream input with attach() — the one input path.** `session.attach(stream)` takes a live browser MediaStream and does the capture for you — audio is resampled to PCM16 24 kHz mono and pushed in 40 ms chunks, video frames are sampled to JPEG at the session cadence:
+**Stream input with attach() — the one input path.** `session.attach({ stream })` takes a live browser MediaStream and does the capture for you — audio is resampled to PCM16 24 kHz mono and pushed in 40 ms chunks, video frames are sampled to JPEG at the session cadence:
 
 ```ts
 const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true }); // audio-only streams work too
-const attached = await session.attach(stream); // resamples + pushes continuously; returns a handle with stop()
-// later: attached.stop() — stops the pumping; the stream's tracks stay yours to stop
+const attached = await session.attach({ stream }); // resamples + pushes continuously; returns a handle with detach()
+// later: attached.detach() — stops the pumping; the stream's tracks stay yours to stop
 ```
 
 **Browser quickstart (no relay).** Your server keeps the org API key and mints a 10-minute client secret; the browser dials `inference.urun.sh` directly — the dial route (`POST /v1/realtime/calls`) is CORS-open for bearer auth, and the WebTransport/WebRTC media leg needs no relay. A runnable minting server is at [examples/typescript/mint_server.ts](https://github.com/urun-sh/sense-sdk/blob/main/examples/typescript/mint_server.ts):
@@ -127,7 +127,7 @@ const app = new Sense({
 });
 const session = app.session();
 const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-const attached = await session.attach(stream); // the one-liner above, now unattended
+const attached = await session.attach({ stream }); // the one-liner above, now unattended
 ```
 
 **Stream programmatic input.** Off the browser, attach sources instead. Each source is an async iterable, a sync iterable, or a zero-arg callable returning the next chunk (null/undefined ends it): audio chunks are PCM16 24 kHz mono bytes, video chunks are JPEG bytes, text chunks are strings appended to the transcript. attach() pumps in the background — no run loop needed for pumping — and the turn opens on the first pushed chunk:
@@ -141,7 +141,7 @@ async function readWaves(): Promise<void> {
 }
 ```
 
-`attached.stop()` stops the pumping; the wave loop returns when the source ends or `session.close()` runs.
+`attached.detach()` stops the pumping; the wave loop returns when the source ends or `session.close()` runs.
 
 **Read decisions off each wave.** Every answered question `id` has a `result` with a `.value`, and a confidence/probability `.p`. Additionally:
 - Choices return confidences for each option in `.pOption(name)`(normalized so they form a discrete probability distribution).
@@ -170,7 +170,7 @@ if (detection.p >= 0.6) {
 try {
     await readWaves(); // first to end: source end or wire death
 } finally {
-    attached.stop(); // stops the pumping; a live MediaStream's tracks stay yours to stop
+    attached.detach(); // stops the pumping; a live MediaStream's tracks stay yours to stop
     await session.close();
 }
 ```

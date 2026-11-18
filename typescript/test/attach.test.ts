@@ -161,7 +161,7 @@ describe("session.attach", () => {
     const expected = floatToPcm16(Float32Array.from(samples.slice(0, PCM_CHUNK_SAMPLES)));
     expect(Array.from(new Int16Array(frame.buffer, frame.byteOffset, 960))).toEqual(Array.from(expected));
 
-    handle.stop();
+    handle.detach();
   });
 
   test("worklet output matches PcmFramer on arbitrary chunk sizes", async () => {
@@ -184,18 +184,18 @@ describe("session.attach", () => {
       fed += size;
     }
     expect(target.pushedAudio.length).toBe(Math.floor(fed / PCM_CHUNK_SAMPLES));
-    handle.stop();
+    handle.detach();
   });
 
   test("stop() closes the context and drops later audio", async () => {
     const target = recordingTarget();
     const { handle, node, wasClosed } = await attachAudio(target);
     expect(wasClosed()).toBe(false);
-    handle.stop();
+    handle.detach();
     expect(wasClosed()).toBe(true);
     node.proc.process([[Float32Array.from({ length: 960 }, () => 0.5)]]);
     expect(target.pushedAudio.length).toBe(0);
-    handle.stop(); // idempotent
+    handle.detach(); // idempotent
   });
 });
 
@@ -249,7 +249,7 @@ describe("session.attach video & guards", () => {
         expect(target.pushedVideo.length).toBeGreaterThanOrEqual(3);
         expect(target.pushedVideo[0]!.byteLength).toBe(1_000);
         expect(qualities).toContain(0.35); // ladder stepped down to fit
-        handle.stop();
+        handle.detach();
         const at = target.pushedVideo.length;
         await vi.advanceTimersByTime(200);
         await flushMicrotasks();

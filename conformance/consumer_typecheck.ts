@@ -4,7 +4,7 @@
  * Exercises the facade (name-first Jev registration), predicate composition,
  * the session surface, and Score narrowing — the API a customer touches first.
  */
-import { Context, Predicate, Score, Sense, Wave } from "@urun-sh/sense";
+import { Context, Predicate, Score, Sense, Wave, type AttachHandle } from "@urun-sh/sense";
 
 const app = new Sense({ apiKey: "k" });
 const q = app.noul("finished", {
@@ -23,8 +23,10 @@ const p = q.and(Predicate({ type: "q", id: "finished" }));
 const byIndex = urgency.pAtLeast(1);
 const byDescription = urgency.pAtLeast("high — blocking right now");
 const s = app.session();
+// attach(): one call, one sources object; detach() is the handle name.
+const attached: Promise<AttachHandle> = s.attach({ audio: [new Uint8Array(2)] });
 const r = s.context.get("finished");
 const n: number | undefined = r instanceof Score ? r.value : undefined;
 const top: string = route.top.eq("billing") ? "billing" : "other";
 const c: Context | null = null;
-void [p, n, Wave, byIndex, byDescription, top, c];
+void [p, n, Wave, byIndex, byDescription, top, c, attached];

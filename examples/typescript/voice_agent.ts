@@ -175,7 +175,7 @@ async function main(): Promise<number> {
         void next.value; // handlers react; the run loop assembles and yields waves
       }
     } finally {
-      attached.stop();
+      attached.detach();
     }
   } finally {
     clearTimeout(timer);

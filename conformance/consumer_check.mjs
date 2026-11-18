@@ -173,7 +173,7 @@ const runPromise = (async () => {
   try {
     for await (const wave of session.run()) void wave;
   } finally {
-    attached.stop();
+    attached.detach();
   }
 })();
 

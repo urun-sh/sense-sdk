@@ -661,7 +661,7 @@ describe("run loop on wire death", () => {
         try {
           return await s.run().next();
         } finally {
-          attached.stop();
+          attached.detach();
         }
       })();
       await drain(); // the pump pushed the chunk through attach

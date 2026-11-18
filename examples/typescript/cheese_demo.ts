@@ -201,7 +201,7 @@ export async function pump(relay: Relay): Promise<void> {
         relay.send({ type: "wave", verdict: toVerdict(wave) });
       }
     } finally {
-      attached.stop();
+      attached.detach();
     }
     if (relay.done) return; // cap path already reported stats and ended
     relay.send({ type: "stats", stats: session.stats });

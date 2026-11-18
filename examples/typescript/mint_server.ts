@@ -14,7 +14,7 @@
  *   const app = new Sense({ apiKey: async () => (await fetch("/client-secret", { method: "POST" })).json().value });
  *   const session = app.session();
  *   const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
- *   const attached = await session.attach(stream);
+ *   const attached = await session.attach({ stream });
  *
  * Client secrets are bearer-only (org key never leaves the server), not
  * single-use, and expire in 10 minutes — mint per user session, or hand the
@@ -27,7 +27,7 @@ const usage = `Sense browser quickstart — your browser page does:
   const app = new Sense({ apiKey: async () => (await fetch("/client-secret", { method: "POST" })).json().value });
   const session = app.session();
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-  const attached = await session.attach(stream);
+  const attached = await session.attach({ stream });
 
 This server answers POST /client-secret with { value: "ek_…", expires_at }.
 See typescript/README.md → "Browser quickstart".`;
