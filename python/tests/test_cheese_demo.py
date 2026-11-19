@@ -1,9 +1,6 @@
-"""Offline tests for the examples/python/cheese_demo.py example script.
-
-The demo is loaded from its repo location without importing it as a package:
-it is a script, and its import-time work (Sense() plus question registration)
-is pure in-memory state, so importing it here is safe and offline.
-"""
+"""Offline tests for examples/python/cheese_demo.py, loaded from its repo
+location: the demo's import-time work (Sense() plus question registration)
+is pure in-memory state, so loading it here is safe and offline."""
 
 import asyncio
 import importlib.util
@@ -19,10 +16,18 @@ from rich.cells import cell_len
 from rich.console import Console, Group
 
 DEMO_PATH = pathlib.Path(__file__).resolve().parents[2] / "examples" / "python" / "cheese_demo.py"
+BARS_PATH = DEMO_PATH.with_name("cheese_bars.py")
 
 
 @pytest.fixture(scope="module")
 def demo():
+    # The demo imports its bars helper as a sibling module (cheese_bars.py
+    # next to it in the repo); bind that name to the source file so these
+    # tests never run a stale staged copy.
+    spec = importlib.util.spec_from_file_location("cheese_bars", BARS_PATH)
+    bars = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = bars
+    spec.loader.exec_module(bars)
     spec = importlib.util.spec_from_file_location("cheese_demo", DEMO_PATH)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -31,11 +36,13 @@ def demo():
 
 
 class FakeResult:
-    def __init__(self, value, p, options=None, top=None):
+    def __init__(self, value, p, options=None, top=None, kind="choice"):
         self.value = value
         self.p = p
         self.options = options or {}
         self.top = top if top is not None else (value if isinstance(value, str) else None)
+        self.distribution = self.options
+        self.kind = kind
 
     def p_option(self, option):
         return self.options.get(option, 0.0)
@@ -45,7 +52,7 @@ class FakeScore(FakeResult):
     """A score result: .value is the expected ordinal, .top the argmax level."""
 
     def __init__(self, top, p, score):
-        super().__init__(score, p, top=top)
+        super().__init__(score, p, top=top, kind="score")
         self.level = top
 
 
@@ -73,6 +80,8 @@ class FakeDisplay:
         self.wave_id = -1
         self.speaking = None
         self.verdict = None
+        self.wave = None
+        self.threshold = 0.6
         self.rendered = 0
 
     def render(self):
@@ -86,14 +95,20 @@ def wave(**overrides):
         "cheese_p": 0.9,
         "kind": "brie",
         "kind_p": 0.9,
-        "feeling": "Delighted",
+        "feeling": "Loves it",
         "feeling_p": 0.9,
         "feeling_score": 3.9,
     }
     fields.update(overrides)
+    speech_p = 0.9 if fields["speech"] else 0.1
+    cheese_p = fields["cheese_p"]
     return FakeWave({
-        "speech": FakeResult(fields["speech"], 0.9 if fields["speech"] else 0.1),
-        "cheese": FakeResult(fields["cheese_p"] >= 0.6, fields["cheese_p"]),
+        "speech": FakeResult(fields["speech"], speech_p,
+                             {"true": speech_p, "false": 1 - speech_p},
+                             top="true" if fields["speech"] else "false", kind="noul"),
+        "cheese": FakeResult(cheese_p >= 0.6, cheese_p,
+                             {"true": cheese_p, "false": 1 - cheese_p},
+                             top="true" if cheese_p >= 0.6 else "false", kind="noul"),
         "cheese_type": FakeResult(fields["kind"], fields["kind_p"], {fields["kind"]: fields["kind_p"]}),
         "feeling": FakeScore(fields["feeling"], fields["feeling_p"], fields["feeling_score"]),
     })
@@ -109,7 +124,7 @@ def test_show_wave_reports_talking_with_kind_and_feeling(demo):
     demo.show_wave(wave(), FakeSession(), display)
     assert display.sense_state == "online"
     assert display.speaking is True
-    assert display.verdict == {"talking": True, "kind": "brie", "feeling": "Delighted", "score": 3.9, "p": 0.9}
+    assert display.verdict == {"talking": True, "kind": "brie", "feeling": "Loves it", "score": 3.9, "p": 0.9}
     assert display.wave_id == 7
     assert display.wire is FakeSession._wire
     assert display.rendered == 1
@@ -124,6 +139,11 @@ def test_show_wave_threshold_is_inclusive(demo):
     assert display.verdict == {"talking": False}
 
 
+def test_display_opens_at_the_tuned_confidence_cut(demo):
+    """0.33 is the cut the 'Loves it' criteria were tuned to (a3682cb)."""
+    assert demo.Display().threshold == 0.33
+
+
 def test_show_wave_nulls_unconfident_kind_and_feeling(demo):
     display = FakeDisplay()
     demo.show_wave(wave(kind_p=0.3, feeling_p=0.3), FakeSession(), display)
@@ -136,6 +156,63 @@ def test_show_wave_null_verdict_when_not_speaking(demo):
     demo.show_wave(wave(speech=False), FakeSession(), display)
     assert display.sense_state == "online"
     assert display.speaking is False
+
+
+def test_decide_retunes_verdict_at_a_new_threshold(demo):
+    display = FakeDisplay()
+    demo.show_wave(wave(cheese_p=0.62), FakeSession(), display)
+    assert display.verdict["talking"] is True
+    display.threshold = 0.65
+    demo.decide(display)
+    assert display.verdict == {"talking": False}
+
+
+def test_decide_with_no_wave_is_a_no_op(demo):
+    demo.decide(FakeDisplay())  # must not raise before the first wave
+
+
+class FakeKeys:
+    """A Keys stand-in that replays queued key events and records close()."""
+
+    def __init__(self, events):
+        self.events = list(events)
+        self.closed = False
+
+    async def start(self):
+        return self
+
+    def close(self):
+        self.closed = True
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.events:
+            raise StopAsyncIteration
+        return self.events.pop(0)
+
+
+def test_tune_threshold_redecides_live(demo, monkeypatch):
+    display = FakeDisplay()
+    demo.show_wave(wave(cheese_p=0.64), FakeSession(), display)
+    assert display.verdict["talking"] is True   # 0.64 >= the fake's 0.6 threshold
+    keys = FakeKeys(["up", "up", "down"])
+    monkeypatch.setattr(demo.cheese_bars, "Keys", lambda: keys)
+    asyncio.run(demo.tune_threshold(display))
+    assert keys.closed is True                  # the reader is always cleaned up
+    assert display.threshold == 0.65            # +0.05 +0.05 -0.05
+    assert display.verdict == {"talking": False}  # 0.64 < 0.65: decision flipped
+
+
+def test_tune_threshold_raises_on_ctrl_c(demo, monkeypatch):
+    display = FakeDisplay()
+    demo.show_wave(wave(cheese_p=0.9), FakeSession(), display)
+    keys = FakeKeys(["ctrl-c"])
+    monkeypatch.setattr(demo.cheese_bars, "Keys", lambda: keys)
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(demo.tune_threshold(display))
+    assert keys.closed is True
 
 
 def test_error_state_maps_exception_types(demo):
@@ -259,6 +336,51 @@ def test_cleanup_survives_cancellation(demo):
     assert closed == ["mic", "waves", "session", "live"]  # nothing skipped
 
 
+# ---------------------------------------------------------------------------
+# refresh_status: diagnostics loop; the last wave must never outlive its wire
+# ---------------------------------------------------------------------------
+
+
+async def run_refresh_passes(demo, display, session):
+    """Let the refresh loop make a few passes, then stop it."""
+    refresh = asyncio.create_task(demo.refresh_status(display, session, interval=0.01))
+    try:
+        await asyncio.sleep(0.05)  # several 10ms passes over the loop body
+    finally:
+        refresh.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await refresh
+
+
+def lost_wire_display():
+    display = FakeDisplay()
+    display.sense_state = "online"
+    display.wire = object()        # the wire the last complete wave arrived on
+    display.wave = wave()
+    display.verdict = {"talking": True}
+    display.speaking = True
+    return display
+
+
+def test_refresh_status_clears_the_last_wave_when_the_wire_is_gone(demo):
+    display = lost_wire_display()
+    asyncio.run(run_refresh_passes(demo, display, SimpleNamespace(_wire=None)))
+    assert display.wave is None            # the stale wave never re-decides
+    assert display.verdict is None
+    assert display.speaking is None
+    assert display.wire is None
+    assert display.sense_state == "connecting"
+
+
+def test_refresh_status_clears_the_last_wave_when_a_new_wire_appears(demo):
+    display = lost_wire_display()
+    session = SimpleNamespace(_wire=SimpleNamespace(closed=False))  # a reconnect
+    asyncio.run(run_refresh_passes(demo, display, session))
+    assert display.wave is None            # the old wire's wave is stale
+    assert display.wire is None
+    assert display.sense_state == "waiting"
+
+
 def test_cleanup_survives_cancellation_during_task_gather(demo):
     """Same contract when the second Ctrl-C lands during the task gather."""
     closed = []
@@ -350,7 +472,7 @@ def test_render_shows_listening_before_a_verdict(demo):
 
 
 def test_render_shows_cheese_verdict(demo):
-    verdict = {"talking": True, "kind": "brie", "feeling": "Delighted", "score": 3.9, "p": 0.9}
+    verdict = {"talking": True, "kind": "brie", "feeling": "Loves it", "score": 3.9, "p": 0.9}
     text = rendered_text(display_with(demo, level=0.5, blocks=3, verdict=verdict, speaking=True))
     assert "CHEESE" in text
     assert "brie" in text
@@ -360,7 +482,7 @@ def test_render_shows_cheese_verdict(demo):
 
 
 def test_render_shows_score_levels(demo):
-    for feeling, score, emoji in [("Delighted", 3.9, "❤️"), ("Likes it", 3.1, "🙂"), ("Dislikes it", 1.2, "🙁"), ("Disgusted", 0.4, "🤮")]:
+    for feeling, score, emoji in [("Loves it", 3.9, "❤️"), ("Likes it", 3.1, "🙂"), ("Dislikes it", 1.2, "🙁"), ("Disgusted", 0.4, "🤮")]:
         verdict = {"talking": True, "kind": "brie", "feeling": feeling, "score": score, "p": 0.9}
         text = rendered_text(display_with(demo, level=0.5, blocks=3, verdict=verdict, speaking=True))
         assert emoji in text, f"expected {emoji} for {feeling}"
@@ -376,7 +498,7 @@ def test_render_shows_not_cheese(demo):
 def test_status_fields_stay_in_place_and_never_wrap(demo):
     positions = []
     for i, (kind, feeling) in enumerate([
-        ("brie", "Delighted"), ("parmesan", "Disgusted"), ("unknown type", "Neutral"),
+        ("brie", "Loves it"), ("parmesan", "Disgusted"), ("unknown type", "Neutral"),
         ("mozzarella", "Dislikes it"), ("feta", "Likes it"),
     ]):
         d = display_with(
@@ -390,7 +512,7 @@ def test_status_fields_stay_in_place_and_never_wrap(demo):
             "Disgusted": "you hate it",
             "Dislikes it": "you dislike it",
             "Likes it": "you like it",
-            "Delighted": "you love it",
+            "Loves it": "you love it",
         }.get(feeling, "neutral sentiment")
         positions.append(tuple(cell_len(text[:text.index(label)]) for label in
                                ("🧀 CHEESE", kind, "(0.90)", sentiment, "(2.3)")))
@@ -444,3 +566,18 @@ def test_render_keeps_header_then_results_then_diagnostics_and_log(demo):
     assert "Sense cheese demo" in texts[0]
     assert texts[1].startswith("  mic |")
     assert texts[2:] == ["diagnostic", "line 1", "line 2"]
+
+
+def test_render_debug_inserts_bars_between_status_and_diagnostics(demo):
+    d = display_with(demo, debug=True, level=0.5, blocks=3)
+    d.wave = wave()
+    d.diagnostic = "diagnostic"
+    d.render()
+    panel = d.live.updates[-1].renderables[2]
+    assert panel.renderables[0].plain.startswith(f"  confidence threshold {d.threshold:.2f}")
+    sections = {group.renderables[0].plain.split(" →")[0].strip(): group
+                for group in panel.renderables[1:]}
+    assert set(sections) == {"speech", "cheese", "cheese type", "feeling"}
+    bar_rows = [row.plain for group in sections.values() for row in group.renderables[1:]]
+    assert all("┃" in row for row in bar_rows)  # the threshold marker on every bar
+    assert d.live.updates[-1].renderables[3].plain == "diagnostic"

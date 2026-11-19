@@ -38,6 +38,8 @@ python -m sense.examples.cheese_demo
 
 Wait for the connection, select your mic, and start talking to Sense.
 
+Run it with `--debug` to see every answer's probability as horizontal bars and tune the decision threshold live with the arrow keys.
+
 ## Python example walk-through
 
 This is an overview of how `sense-sdk` is used to build the demo above. Sense is a decision model, you program it with questions and let it decide the answers. Sense currently supports 3 types of question:
@@ -82,7 +84,7 @@ If you want an ordered scale use a `score` — `criteria` is an ordered array of
 feeling = app.score(
     "feeling",
     instructions="How does the speaker feel about that cheese?",
-    criteria=["Disgusted", "Dislikes it", "Neutral", "Likes it", "Delighted"],
+    criteria=["Disgusted", "Dislikes it", "Neutral", "Likes it", "Loves it"],
 )
 ```
 
@@ -117,16 +119,16 @@ Audio pushes and wave consumption must both make progress — a blocking wave lo
   - The expected index value in `.value`, in this case (0..4) across 5 levels.
   - Cumulative tail probabilities in `.p_at_least(level)` — a zero-based index or the exact level description.
 
-You will usually want to gate actions on the probability (the example requires p >= 0.6 to trust any result):
+You will usually want to gate actions on the probability (the demo gates at p >= 0.33 — tune it live with --debug):
 
 ```python
 speaking = bool(wave.result("speech").value)
 detection = wave.result("cheese")
-if detection.p >= 0.6:
+if detection.p >= 0.33:
     kind = wave.result("cheese_type")
-    name = kind.value if kind.p_option(kind.value) >= 0.6 else "unknown type"
+    name = kind.value if kind.p_option(kind.value) >= 0.33 else "unknown type"
     sentiment = wave.result("feeling")
-    mood = sentiment.top if sentiment.p >= 0.6 else "undecided"
+    mood = sentiment.top if sentiment.p >= 0.33 else "Neutral"
     mood_score = sentiment.value  # Expected index value
 ```
 
