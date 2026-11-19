@@ -25,11 +25,11 @@ from array import array
 from collections import deque
 from contextlib import suppress
 
+import cheese_bars  # the --debug probability bars
 from rich.console import Group
 from rich.live import Live
 from rich.text import Text
 from sense import Sense, SenseUnavailable
-from sense.examples import cheese_bars  # the --debug probability bars
 
 SAMPLE_RATE = 24000   # the SDK speaks 24 kHz PCM16 mono
 CHUNK_MS = 40         # like a live mic cadence

@@ -21,15 +21,13 @@ BARS_PATH = DEMO_PATH.with_name("cheese_bars.py")
 
 @pytest.fixture(scope="module")
 def demo():
-    # The demo imports its drawing helpers as sense.examples.cheese_bars (the
-    # package the wheel ships them in); bind that name to the source file so
-    # these tests never run a stale staged copy.
-    import sense.examples
-    spec = importlib.util.spec_from_file_location("sense.examples.cheese_bars", BARS_PATH)
+    # The demo imports its bars helper as a sibling module (cheese_bars.py
+    # next to it in the repo); bind that name to the source file so these
+    # tests never run a stale staged copy.
+    spec = importlib.util.spec_from_file_location("cheese_bars", BARS_PATH)
     bars = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = bars
     spec.loader.exec_module(bars)
-    sense.examples.cheese_bars = bars
     spec = importlib.util.spec_from_file_location("cheese_demo", DEMO_PATH)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module

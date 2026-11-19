@@ -12,15 +12,31 @@ from pathlib import Path
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 
+def stage_examples(python_root: Path) -> None:
+    """Stage <repo>/examples into python_root/src/sense/examples."""
+    examples = python_root.parent / "examples"
+    if not (examples / "python").is_dir():
+        return  # building from an sdist: the examples are already staged
+    dest = python_root / "src" / "sense" / "examples"
+    shutil.rmtree(dest, ignore_errors=True)
+    shutil.copytree(examples / "python", dest, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(examples / "assets", dest / "assets")
+    # The demo imports its bars helper as a sibling module; staged inside the
+    # package that helper is a submodule, so the import needs the relative form.
+    demo = dest / "cheese_demo.py"
+    demo.write_text(
+        "\n".join(
+            line.replace("import cheese_bars", "from . import cheese_bars", 1)
+            if line.startswith("import cheese_bars")
+            else line
+            for line in demo.read_text().splitlines()
+        )
+        + "\n"
+    )
+
+
 class ExamplesBuildHook(BuildHookInterface):
     PLUGIN_NAME = "examples"
 
     def initialize(self, version, build_data):
-        root = Path(self.root)
-        examples = root.parent / "examples"
-        if not (examples / "python").is_dir():
-            return
-        dest = root / "src" / "sense" / "examples"
-        shutil.rmtree(dest, ignore_errors=True)
-        shutil.copytree(examples / "python", dest, ignore=shutil.ignore_patterns("__pycache__"))
-        shutil.copytree(examples / "assets", dest / "assets")
+        stage_examples(Path(self.root))
