@@ -230,6 +230,7 @@ async def refresh_status(display, session=None, interval=0.1):
                 display.last_wave_ts = 0.0
                 display.wire = None
                 display.verdict = None
+                display.wave = None
                 display.speaking = None
                 if wire is not None and not wire.closed:
                     # Tie the wait window to this wire so a reconnect restarts it.
