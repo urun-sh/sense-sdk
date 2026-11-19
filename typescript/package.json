@@ -55,7 +55,7 @@
     "@types/ws": "^8.18.2",
     "jscpd": "^5.4.2",
     "oxlint": "^1.91.0",
-    "typescript": "^5.9.0"
+    "typescript": "^7.0.2"
   },
   "optionalDependencies": {
     "@fails-components/webtransport-transport-http3-quiche": "^1.6.12"
