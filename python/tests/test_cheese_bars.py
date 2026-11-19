@@ -162,7 +162,6 @@ def test_row_highlights_only_the_selected_answer(bars):
 
 
 def test_rows_are_horizontal_bars(bars):
-    """One row per answer; the bar extends rightward from its label."""
     entries = [("cheese type", result("choice", CHOICE))]
     rows = lines(bars.panel(entries, 0.6))[2:]
     for row in rows:

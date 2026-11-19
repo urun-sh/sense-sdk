@@ -1,13 +1,7 @@
-"""Debug-mode bars and live threshold tuning for the cheese demo.
-
-The demo's ``--debug`` flag draws every answer's probability as a
-horizontal bar — one row per answer, the decision threshold marked on the
-bar — and reads the key presses (arrows or +/-) that tune the threshold
-while the demo runs. The drawing and key handling live here so the demo
-file itself carries no UI code.
+"""--debug support for the cheese demo: horizontal probability bars with
+the decision threshold marked, and the key presses that tune it. Kept out
+of the demo so that file stays about the Sense API.
 """
-
-from __future__ import annotations
 
 import asyncio
 import os
@@ -15,8 +9,6 @@ import sys
 
 from rich.console import Group
 from rich.text import Text
-
-__all__ = ["Keys", "adjust", "bar", "panel", "parse_keys"]
 
 STEP = 0.05           # threshold change per key press
 BAR_WIDTH = 32        # bar cells spanning probability 0.0 .. 1.0
@@ -27,7 +19,7 @@ ARROWS = {"A": "up", "B": "down", "C": "right", "D": "left"}
 
 def adjust(key, threshold):
     """The threshold after a tuning key (arrows or +/-), or None for any
-    other key. Clamped to [0, 1]."""
+    other key; clamped to [0, 1]."""
     delta = {"up": STEP, "+": STEP, "down": -STEP, "-": -STEP}.get(key)
     if delta is None:
         return None
@@ -35,13 +27,8 @@ def adjust(key, threshold):
 
 
 def panel(entries, threshold):
-    """Bars for every answer of every question, threshold marked on each.
-
-    ``entries`` are (question label, result) pairs; results are duck-typed
-    on the SDK surface: ``distribution`` (answer -> probability), ``top``
-    (the selected answer), ``p`` (its probability), ``kind`` ('noul' |
-    'choice' | 'score').
-    """
+    """A bar per answer of every question, the threshold marked on each;
+    ``entries`` are (label, result) pairs."""
     if not entries:
         return None
     header = Text(f"  confidence threshold {threshold:.2f} · ↑/↓ tune live", style="dim")
@@ -60,8 +47,8 @@ def section(label, result, threshold):
 
 
 def answers(result):
-    """Every answer's probability. Scores keep their level order (low end
-    first), choices rank by probability, noul keeps its true/false order."""
+    """Every answer's probability: choices rank by probability, scores keep
+    their level order (low end first), noul keeps its true/false order."""
     distribution = result.distribution or {str(result.top): result.p or 0.0}
     if getattr(result, "kind", "") == "choice":
         return sorted(distribution.items(), key=lambda item: item[1], reverse=True)
@@ -80,15 +67,15 @@ def row(answer, p, winner, threshold):
 
 
 def bar(p, threshold, winner):
-    """One horizontal bar: fill to p over a dotted track, with the decision
-    threshold drawn as a cut across the bar."""
+    """One horizontal bar: fill to p over a dotted track, the threshold cut
+    across it."""
     fill = p * BAR_WIDTH
     whole = int(fill)
     fraction = fill - whole
     cut = min(BAR_WIDTH - 1, round(threshold * BAR_WIDTH))
     text = Text(no_wrap=True)
     for i in range(BAR_WIDTH):
-        if i == cut:  # the threshold marker, drawn over bar or track
+        if i == cut:  # threshold marker, over bar or track
             text.append("┃", style="magenta")
         elif i < whole:
             text.append("█", style="cyan" if winner else "grey37")
@@ -110,10 +97,10 @@ def parse_keys(buf):
                 events.append(ARROWS.get(chr(buf[2]), "esc"))
                 del buf[:3]
             elif len(buf) == 1:
-                break  # lone ESC so far: wait to see if a sequence follows
+                break  # lone ESC so far: wait for the rest
             elif buf[1] in (0x5B, 0x4F):
-                break  # ESC [ arrived, the final letter is still pending
-            else:  # a lone Escape: unused by the demo, drop it
+                break  # ESC [ so far: wait for the letter
+            else:  # a lone Escape: drop it
                 del buf[0]
             continue
         events.append(_name(buf.pop(0)))
@@ -129,13 +116,10 @@ def _name(byte):
 
 
 class Keys:
-    """Async iterator over normalized key events for threshold tuning.
-
-    POSIX terminals are switched to cbreak for the reader's lifetime; Ctrl-C
-    keeps raising KeyboardInterrupt because ISIG stays enabled. close() is
-    synchronous and idempotent so a cancelled tuner task still restores the
-    terminal. Iteration ends at EOF.
-    """
+    """Async iterator over key events for threshold tuning. Holds the
+    terminal in cbreak until close() — synchronous and idempotent, so a
+    cancelled tuner still restores it. Ctrl-C still interrupts; the stream
+    ends at EOF."""
 
     def __init__(self):
         self._events = asyncio.Queue()

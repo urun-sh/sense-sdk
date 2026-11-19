@@ -1,9 +1,6 @@
-"""Offline tests for the examples/python/cheese_demo.py example script.
-
-The demo is loaded from its repo location without importing it as a package:
-it is a script, and its import-time work (Sense() plus question registration)
-is pure in-memory state, so importing it here is safe and offline.
-"""
+"""Offline tests for examples/python/cheese_demo.py, loaded from its repo
+location: the demo's import-time work (Sense() plus question registration)
+is pure in-memory state, so loading it here is safe and offline."""
 
 import asyncio
 import importlib.util
@@ -19,10 +16,20 @@ from rich.cells import cell_len
 from rich.console import Console, Group
 
 DEMO_PATH = pathlib.Path(__file__).resolve().parents[2] / "examples" / "python" / "cheese_demo.py"
+BARS_PATH = DEMO_PATH.with_name("cheese_bars.py")
 
 
 @pytest.fixture(scope="module")
 def demo():
+    # The demo imports its drawing helpers as sense.examples.cheese_bars (the
+    # package the wheel ships them in); bind that name to the source file so
+    # these tests never run a stale staged copy.
+    import sense.examples
+    spec = importlib.util.spec_from_file_location("sense.examples.cheese_bars", BARS_PATH)
+    bars = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = bars
+    spec.loader.exec_module(bars)
+    sense.examples.cheese_bars = bars
     spec = importlib.util.spec_from_file_location("cheese_demo", DEMO_PATH)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -90,7 +97,7 @@ def wave(**overrides):
         "cheese_p": 0.9,
         "kind": "brie",
         "kind_p": 0.9,
-        "feeling": "Delighted",
+        "feeling": "Loves it",
         "feeling_p": 0.9,
         "feeling_score": 3.9,
     }
@@ -119,7 +126,7 @@ def test_show_wave_reports_talking_with_kind_and_feeling(demo):
     demo.show_wave(wave(), FakeSession(), display)
     assert display.sense_state == "online"
     assert display.speaking is True
-    assert display.verdict == {"talking": True, "kind": "brie", "feeling": "Delighted", "score": 3.9, "p": 0.9}
+    assert display.verdict == {"talking": True, "kind": "brie", "feeling": "Loves it", "score": 3.9, "p": 0.9}
     assert display.wave_id == 7
     assert display.wire is FakeSession._wire
     assert display.rendered == 1
@@ -149,7 +156,6 @@ def test_show_wave_null_verdict_when_not_speaking(demo):
 
 
 def test_decide_retunes_verdict_at_a_new_threshold(demo):
-    """Debug mode's live tuning: a threshold change re-decides the last wave."""
     display = FakeDisplay()
     demo.show_wave(wave(cheese_p=0.62), FakeSession(), display)
     assert display.verdict["talking"] is True
@@ -185,10 +191,9 @@ class FakeKeys:
 
 
 def test_tune_threshold_redecides_live(demo, monkeypatch):
-    """The debug tuner: each key press moves the threshold and re-decides."""
     display = FakeDisplay()
     demo.show_wave(wave(cheese_p=0.64), FakeSession(), display)
-    assert display.verdict["talking"] is True   # 0.64 >= default threshold 0.6
+    assert display.verdict["talking"] is True   # 0.64 >= the fake's 0.6 threshold
     keys = FakeKeys(["up", "up", "down"])
     monkeypatch.setattr(demo.cheese_bars, "Keys", lambda: keys)
     asyncio.run(demo.tune_threshold(display))
@@ -419,7 +424,7 @@ def test_render_shows_listening_before_a_verdict(demo):
 
 
 def test_render_shows_cheese_verdict(demo):
-    verdict = {"talking": True, "kind": "brie", "feeling": "Delighted", "score": 3.9, "p": 0.9}
+    verdict = {"talking": True, "kind": "brie", "feeling": "Loves it", "score": 3.9, "p": 0.9}
     text = rendered_text(display_with(demo, level=0.5, blocks=3, verdict=verdict, speaking=True))
     assert "CHEESE" in text
     assert "brie" in text
@@ -429,7 +434,7 @@ def test_render_shows_cheese_verdict(demo):
 
 
 def test_render_shows_score_levels(demo):
-    for feeling, score, emoji in [("Delighted", 3.9, "❤️"), ("Likes it", 3.1, "🙂"), ("Dislikes it", 1.2, "🙁"), ("Disgusted", 0.4, "🤮")]:
+    for feeling, score, emoji in [("Loves it", 3.9, "❤️"), ("Likes it", 3.1, "🙂"), ("Dislikes it", 1.2, "🙁"), ("Disgusted", 0.4, "🤮")]:
         verdict = {"talking": True, "kind": "brie", "feeling": feeling, "score": score, "p": 0.9}
         text = rendered_text(display_with(demo, level=0.5, blocks=3, verdict=verdict, speaking=True))
         assert emoji in text, f"expected {emoji} for {feeling}"
@@ -445,7 +450,7 @@ def test_render_shows_not_cheese(demo):
 def test_status_fields_stay_in_place_and_never_wrap(demo):
     positions = []
     for i, (kind, feeling) in enumerate([
-        ("brie", "Delighted"), ("parmesan", "Disgusted"), ("unknown type", "Neutral"),
+        ("brie", "Loves it"), ("parmesan", "Disgusted"), ("unknown type", "Neutral"),
         ("mozzarella", "Dislikes it"), ("feta", "Likes it"),
     ]):
         d = display_with(
@@ -459,7 +464,7 @@ def test_status_fields_stay_in_place_and_never_wrap(demo):
             "Disgusted": "you hate it",
             "Dislikes it": "you dislike it",
             "Likes it": "you like it",
-            "Delighted": "you love it",
+            "Loves it": "you love it",
         }.get(feeling, "neutral sentiment")
         positions.append(tuple(cell_len(text[:text.index(label)]) for label in
                                ("🧀 CHEESE", kind, "(0.90)", sentiment, "(2.3)")))
@@ -521,7 +526,7 @@ def test_render_debug_inserts_bars_between_status_and_diagnostics(demo):
     d.diagnostic = "diagnostic"
     d.render()
     panel = d.live.updates[-1].renderables[2]
-    assert panel.renderables[0].plain.startswith("  confidence threshold 0.60")
+    assert panel.renderables[0].plain.startswith(f"  confidence threshold {d.threshold:.2f}")
     sections = {group.renderables[0].plain.split(" →")[0].strip(): group
                 for group in panel.renderables[1:]}
     assert set(sections) == {"speech", "cheese", "cheese type", "feeling"}

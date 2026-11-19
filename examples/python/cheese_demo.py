@@ -29,14 +29,7 @@ from rich.console import Group
 from rich.live import Live
 from rich.text import Text
 from sense import Sense, SenseUnavailable
-
-# The debug bars module ships with the demo: the build stages examples/python
-# into the wheel as the sense.examples package.
-try:
-    from . import cheese_bars  # python -m sense.examples.cheese_demo
-except ImportError:  # plain script run or test load: import the sibling file
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import cheese_bars
+from sense.examples import cheese_bars  # the --debug probability bars
 
 SAMPLE_RATE = 24000   # the SDK speaks 24 kHz PCM16 mono
 CHUNK_MS = 40         # like a live mic cadence
@@ -69,7 +62,7 @@ feeling = app.score(
     instructions="How does the speaker feel about that cheese?",
     criteria=["Disgusted", "Dislikes it", "Neutral", "Likes it", "Loves it"],
 )
-# The --debug bars panel draws every answer's probability for each of these.
+# --debug panel rows: display label, question id.
 DEBUG_QUESTIONS = (("speech", "speech"), ("cheese", "cheese"),
                     ("cheese type", "cheese_type"), ("feeling", "feeling"))
 
@@ -86,8 +79,8 @@ def show_wave(wave, session, display):
 
 
 def decide(display):
-    """Derive the verdict from the latest wave at the current threshold;
-    re-run on every threshold change so decisions tune live."""
+    """Verdict for the latest wave at the current threshold; re-run on every
+    threshold change so decisions tune live."""
     wave = display.wave
     if wave is None:
         return
@@ -108,8 +101,8 @@ def decide(display):
 
 
 async def tune_threshold(display):
-    """Debug mode: ↑/↓ (or +/-) move the confidence threshold; every change
-    re-decides the latest wave so verdicts tune live."""
+    """--debug: ↑/↓ (or +/-) move the confidence threshold; every change
+    re-decides the latest wave."""
     reader = cheese_bars.Keys()
     try:
         await reader.start()
@@ -306,13 +299,12 @@ class Display:
         self.diagnostic = ""
         self.log = deque(maxlen=3)         # last SDK log lines, shown below the diagnostic
         self.live = Live(auto_refresh=False)
-        self.debug = debug       # --debug: probability bars + live threshold tuning
-        self.wave = None         # latest wave, kept for re-deciding at a new threshold
+        self.debug = debug       # --debug: probability bars + threshold tuning
+        self.wave = None         # latest wave, re-decided when the threshold moves
         self.threshold = 0.33    # confidence cut for the talking/kind/feeling decisions
 
     def debug_entries(self):
-        """(label, result) pairs for the bars panel; the SDK results carry
-        each question's full answer distribution."""
+        """(label, result) pairs for the --debug bars panel."""
         if self.wave is None:
             return []
         return [(label, self.wave.result(qid)) for label, qid in DEBUG_QUESTIONS]
