@@ -139,6 +139,11 @@ def test_show_wave_threshold_is_inclusive(demo):
     assert display.verdict == {"talking": False}
 
 
+def test_display_opens_at_the_tuned_confidence_cut(demo):
+    """0.33 is the cut the 'Loves it' criteria were tuned to (a3682cb)."""
+    assert demo.Display().threshold == 0.33
+
+
 def test_show_wave_nulls_unconfident_kind_and_feeling(demo):
     display = FakeDisplay()
     demo.show_wave(wave(kind_p=0.3, feeling_p=0.3), FakeSession(), display)
@@ -329,6 +334,51 @@ def test_cleanup_survives_cancellation(demo):
 
     asyncio.run(scenario())
     assert closed == ["mic", "waves", "session", "live"]  # nothing skipped
+
+
+# ---------------------------------------------------------------------------
+# refresh_status: diagnostics loop; the last wave must never outlive its wire
+# ---------------------------------------------------------------------------
+
+
+async def run_refresh_passes(demo, display, session):
+    """Let the refresh loop make a few passes, then stop it."""
+    refresh = asyncio.create_task(demo.refresh_status(display, session, interval=0.01))
+    try:
+        await asyncio.sleep(0.05)  # several 10ms passes over the loop body
+    finally:
+        refresh.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await refresh
+
+
+def lost_wire_display():
+    display = FakeDisplay()
+    display.sense_state = "online"
+    display.wire = object()        # the wire the last complete wave arrived on
+    display.wave = wave()
+    display.verdict = {"talking": True}
+    display.speaking = True
+    return display
+
+
+def test_refresh_status_clears_the_last_wave_when_the_wire_is_gone(demo):
+    display = lost_wire_display()
+    asyncio.run(run_refresh_passes(demo, display, SimpleNamespace(_wire=None)))
+    assert display.wave is None            # the stale wave never re-decides
+    assert display.verdict is None
+    assert display.speaking is None
+    assert display.wire is None
+    assert display.sense_state == "connecting"
+
+
+def test_refresh_status_clears_the_last_wave_when_a_new_wire_appears(demo):
+    display = lost_wire_display()
+    session = SimpleNamespace(_wire=SimpleNamespace(closed=False))  # a reconnect
+    asyncio.run(run_refresh_passes(demo, display, session))
+    assert display.wave is None            # the old wire's wave is stale
+    assert display.wire is None
+    assert display.sense_state == "waiting"
 
 
 def test_cleanup_survives_cancellation_during_task_gather(demo):

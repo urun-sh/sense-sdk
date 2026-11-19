@@ -22,7 +22,7 @@ def bars():
 
 def result(kind, distribution, top=None):
     """A stand-in for the SDK Result duck-typed surface the bars read."""
-    top = top if top is not None else next(iter(distribution))
+    top = top if top is not None else max(distribution, key=distribution.get)
     return SimpleNamespace(kind=kind, distribution=dict(distribution), top=top,
                             p=distribution.get(top, 0.0), value=top)
 
@@ -33,7 +33,9 @@ def lines(renderable):
     return console.export_text().splitlines()
 
 
-CHOICE = {"brie": 0.72, "cheddar": 0.18, "gouda": 0.10}
+# Insertion order deliberately differs from probability order: the panel must
+# rank answers by probability itself, not inherit dict order.
+CHOICE = {"gouda": 0.10, "brie": 0.72, "cheddar": 0.18}
 SCORE = {"Disgusted": 0.04, "Dislikes it": 0.05, "Neutral": 0.11, "Likes it": 0.30, "Delighted": 0.50}
 NOUL = {"true": 0.62, "false": 0.38}
 
