@@ -6,11 +6,6 @@
     uv venv --python 3.11
     uv pip install --python .venv/bin/python "$(ls -t dist/urun_sense-*.whl | head -n 1)[demo]"
     URUN_API_KEY="<urun-key>" .venv/bin/python examples/python/cheese_demo.py
-
-Linux mic: PipeWire (pw-record, pw-dump, wpctl).
-
---debug shows every answer's probability as horizontal bars and lets you
-tune the decision threshold live with the arrow keys.
 """
 import argparse
 import asyncio
