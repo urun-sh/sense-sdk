@@ -8,6 +8,9 @@
     URUN_API_KEY="<urun-key>" .venv/bin/python examples/python/cheese_demo.py
 
 Linux mic: PipeWire (pw-record, pw-dump, wpctl).
+
+--debug shows every answer's probability as horizontal bars and lets you
+tune the decision threshold live with the arrow keys.
 """
 import argparse
 import asyncio
@@ -27,9 +30,17 @@ from rich.live import Live
 from rich.text import Text
 from sense import Sense, SenseUnavailable
 
+# The debug bars module ships with the demo: the build stages examples/python
+# into the wheel as the sense.examples package.
+try:
+    from . import cheese_bars  # python -m sense.examples.cheese_demo
+except ImportError:  # plain script run or test load: import the sibling file
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import cheese_bars
+
 SAMPLE_RATE = 24000   # the SDK speaks 24 kHz PCM16 mono
 CHUNK_MS = 40         # like a live mic cadence
-FEELING_EMOJI = {"Disgusted": "🧀🤮", "Dislikes it": "🧀🙁", "Neutral": "🧀😐", "Likes it": "🧀🙂", "Delighted": "🧀❤️"}
+FEELING_EMOJI = {"Disgusted": "🧀🤮", "Dislikes it": "🧀🙁", "Neutral": "🧀😐", "Likes it": "🧀🙂", "Loves it": "🧀❤️"}
 BLOCKSIZE = SAMPLE_RATE * CHUNK_MS // 1000  # 960 samples per callback
 USE_PIPEWIRE = sys.platform.startswith("linux")
 
@@ -56,8 +67,11 @@ kind = app.choice(
 feeling = app.score(
     "feeling",
     instructions="How does the speaker feel about that cheese?",
-    criteria=["Disgusted", "Dislikes it", "Neutral", "Likes it", "Delighted"],
+    criteria=["Disgusted", "Dislikes it", "Neutral", "Likes it", "Loves it"],
 )
+# The --debug bars panel draws every answer's probability for each of these.
+DEBUG_QUESTIONS = (("speech", "speech"), ("cheese", "cheese"),
+                    ("cheese type", "cheese_type"), ("feeling", "feeling"))
 
 
 def show_wave(wave, session, display):
@@ -67,19 +81,48 @@ def show_wave(wave, session, display):
     display.wire = session._wire
     display.diagnostic = ""
     display.wave_id = wave.wave_id
+    display.wave = wave
+    decide(display)
+
+
+def decide(display):
+    """Derive the verdict from the latest wave at the current threshold;
+    re-run on every threshold change so decisions tune live."""
+    wave = display.wave
+    if wave is None:
+        return
     display.speaking = bool(wave.result("speech").value)
     detection = wave.result("cheese")
-    display.verdict = {"talking": detection.p >= 0.6}
+    threshold = display.threshold
+    display.verdict = {"talking": detection.p >= threshold}
     if display.verdict["talking"]:
         cheese_type = wave.result("cheese_type")
         sentiment = wave.result("feeling")
         display.verdict.update(
-            kind=cheese_type.value if cheese_type.p_option(cheese_type.value) >= 0.6 else "unknown type",
-            feeling=sentiment.top if sentiment.p >= 0.6 else "Neutral",
+            kind=cheese_type.value if cheese_type.p_option(cheese_type.value) >= threshold else "unknown type",
+            feeling=sentiment.top if sentiment.p >= threshold else "Neutral",
             score=sentiment.value,
             p=detection.p,
         )
     display.render()
+
+
+async def tune_threshold(display):
+    """Debug mode: ↑/↓ (or +/-) move the confidence threshold; every change
+    re-decides the latest wave so verdicts tune live."""
+    reader = cheese_bars.Keys()
+    try:
+        await reader.start()
+        async for key in reader:
+            if key == "ctrl-c":
+                raise KeyboardInterrupt
+            threshold = cheese_bars.adjust(key, display.threshold)
+            if threshold is None:
+                continue
+            display.threshold = threshold
+            decide(display)
+    finally:
+        reader.close()
 
 
 async def send_audio(mic, session, to_sense):
@@ -98,7 +141,7 @@ async def receive_decisions(waves, session, display):
 
 
 async def main(args) -> int:
-    display = Display()
+    display = Display(debug=args.debug)
     sense_log = logging.getLogger("sense")
     sense_log.addHandler(LogTail(display))
     sense_log.setLevel(logging.INFO)
@@ -116,6 +159,8 @@ async def main(args) -> int:
         await mic.start()
         tasks = [asyncio.create_task(refresh_status(display, None if args.mic_only else session)),
                  asyncio.create_task(send_audio(mic, session, not args.mic_only))]
+        if args.debug:
+            tasks.append(asyncio.create_task(tune_threshold(display)))
         if args.mic_only:
             display.sense_state = "disabled"
         else:
@@ -249,7 +294,7 @@ class LogTail(logging.Handler):
 class Display:
     """Title/connection, aligned results, then diagnostics and logs, updated in place."""
 
-    def __init__(self) -> None:
+    def __init__(self, debug: bool = False) -> None:
         self.level = 0.0          # mic peak, 0..1 (purely client-side)
         self.blocks = 0           # audio blocks received from the mic driver
         self.verdict = None       # latest wave dict or None
@@ -261,6 +306,16 @@ class Display:
         self.diagnostic = ""
         self.log = deque(maxlen=3)         # last SDK log lines, shown below the diagnostic
         self.live = Live(auto_refresh=False)
+        self.debug = debug       # --debug: probability bars + live threshold tuning
+        self.wave = None         # latest wave, kept for re-deciding at a new threshold
+        self.threshold = 0.33    # confidence cut for the talking/kind/feeling decisions
+
+    def debug_entries(self):
+        """(label, result) pairs for the bars panel; the SDK results carry
+        each question's full answer distribution."""
+        if self.wave is None:
+            return []
+        return [(label, self.wave.result(qid)) for label, qid in DEBUG_QUESTIONS]
 
     def _sense_indicator(self):
         """The Sense connection state shown after the title."""
@@ -315,13 +370,13 @@ class Display:
         elif self.verdict["talking"]:
             k, f = self.verdict["kind"], self.verdict["feeling"]
             # The score's levels are description labels now (Jev's criteria).
-            col = GREEN if f in ("Likes it", "Delighted") else RED if f in ("Disgusted", "Dislikes it") else YELLOW
+            col = GREEN if f in ("Likes it", "Loves it") else RED if f in ("Disgusted", "Dislikes it") else YELLOW
             emoji = FEELING_EMOJI.get(f, "🧀😐")
             sentiment = {
                 "Disgusted": "you hate it",
                 "Dislikes it": "you dislike it",
                 "Likes it": "you like it",
-                "Delighted": "you love it",
+                "Loves it": "you love it",
             }.get(f, "neutral sentiment")
             body = Text.assemble(
                 Text.from_ansi(f"{BOLD}{MAGENTA}🧀 CHEESE{RESET} {DIM}·{RESET} "),
@@ -345,7 +400,14 @@ class Display:
             no_wrap=True, overflow="ellipsis",
         )
         log_lines = [Text(line, style="dim") for line in self.log]
-        self.live.update(Group(header, status, Text(self.diagnostic, style="dim"), *log_lines), refresh=True)
+        renderables = [header, status]
+        if self.debug:
+            bars = cheese_bars.panel(self.debug_entries(), self.threshold)
+            if bars is not None:
+                renderables.append(bars)
+        renderables.append(Text(self.diagnostic, style="dim"))
+        renderables.extend(log_lines)
+        self.live.update(Group(*renderables), refresh=True)
 
 
 # -- Microphone input: identical PCM blocks on every platform -----------------
@@ -503,6 +565,8 @@ if __name__ == "__main__":
     parser.add_argument("--device",
                         help="Skip the menu with a device name or ID; auto uses system default")
     parser.add_argument("--mic-only", action="store_true", help="Test microphone without connecting to Sense")
+    parser.add_argument("--debug", action="store_true",
+                        help="Show every answer's probability as horizontal bars and tune the decision threshold live (arrow keys)")
     args = parser.parse_args()
     if USE_PIPEWIRE:
         os.environ.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")

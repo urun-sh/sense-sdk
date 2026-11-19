@@ -65,6 +65,8 @@ python -m sense.examples.cheese_demo
 
 Wait for the connection, select your mic, and start talking to Sense.
 
+Run it with `--debug` to see every answer's probability as horizontal bars and tune the decision threshold live with the arrow keys.
+
 #### TypeScript (local server + browser session):
 
 Launch a server then open the URL in your browser:

@@ -38,6 +38,8 @@ python -m sense.examples.cheese_demo
 
 Wait for the connection, select your mic, and start talking to Sense.
 
+Run it with `--debug` to see every answer's probability as horizontal bars and tune the decision threshold live with the arrow keys.
+
 ## Python example walk-through
 
 This is an overview of how `sense-sdk` is used to build the demo above. Sense is a decision model, you program it with questions and let it decide the answers. Sense currently supports 3 types of question:

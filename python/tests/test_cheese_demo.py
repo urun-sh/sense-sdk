@@ -31,11 +31,13 @@ def demo():
 
 
 class FakeResult:
-    def __init__(self, value, p, options=None, top=None):
+    def __init__(self, value, p, options=None, top=None, kind="choice"):
         self.value = value
         self.p = p
         self.options = options or {}
         self.top = top if top is not None else (value if isinstance(value, str) else None)
+        self.distribution = self.options
+        self.kind = kind
 
     def p_option(self, option):
         return self.options.get(option, 0.0)
@@ -45,7 +47,7 @@ class FakeScore(FakeResult):
     """A score result: .value is the expected ordinal, .top the argmax level."""
 
     def __init__(self, top, p, score):
-        super().__init__(score, p, top=top)
+        super().__init__(score, p, top=top, kind="score")
         self.level = top
 
 
@@ -73,6 +75,8 @@ class FakeDisplay:
         self.wave_id = -1
         self.speaking = None
         self.verdict = None
+        self.wave = None
+        self.threshold = 0.6
         self.rendered = 0
 
     def render(self):
@@ -91,9 +95,15 @@ def wave(**overrides):
         "feeling_score": 3.9,
     }
     fields.update(overrides)
+    speech_p = 0.9 if fields["speech"] else 0.1
+    cheese_p = fields["cheese_p"]
     return FakeWave({
-        "speech": FakeResult(fields["speech"], 0.9 if fields["speech"] else 0.1),
-        "cheese": FakeResult(fields["cheese_p"] >= 0.6, fields["cheese_p"]),
+        "speech": FakeResult(fields["speech"], speech_p,
+                             {"true": speech_p, "false": 1 - speech_p},
+                             top="true" if fields["speech"] else "false", kind="noul"),
+        "cheese": FakeResult(cheese_p >= 0.6, cheese_p,
+                             {"true": cheese_p, "false": 1 - cheese_p},
+                             top="true" if cheese_p >= 0.6 else "false", kind="noul"),
         "cheese_type": FakeResult(fields["kind"], fields["kind_p"], {fields["kind"]: fields["kind_p"]}),
         "feeling": FakeScore(fields["feeling"], fields["feeling_p"], fields["feeling_score"]),
     })
@@ -136,6 +146,65 @@ def test_show_wave_null_verdict_when_not_speaking(demo):
     demo.show_wave(wave(speech=False), FakeSession(), display)
     assert display.sense_state == "online"
     assert display.speaking is False
+
+
+def test_decide_retunes_verdict_at_a_new_threshold(demo):
+    """Debug mode's live tuning: a threshold change re-decides the last wave."""
+    display = FakeDisplay()
+    demo.show_wave(wave(cheese_p=0.62), FakeSession(), display)
+    assert display.verdict["talking"] is True
+    display.threshold = 0.65
+    demo.decide(display)
+    assert display.verdict == {"talking": False}
+
+
+def test_decide_with_no_wave_is_a_no_op(demo):
+    demo.decide(FakeDisplay())  # must not raise before the first wave
+
+
+class FakeKeys:
+    """A Keys stand-in that replays queued key events and records close()."""
+
+    def __init__(self, events):
+        self.events = list(events)
+        self.closed = False
+
+    async def start(self):
+        return self
+
+    def close(self):
+        self.closed = True
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.events:
+            raise StopAsyncIteration
+        return self.events.pop(0)
+
+
+def test_tune_threshold_redecides_live(demo, monkeypatch):
+    """The debug tuner: each key press moves the threshold and re-decides."""
+    display = FakeDisplay()
+    demo.show_wave(wave(cheese_p=0.64), FakeSession(), display)
+    assert display.verdict["talking"] is True   # 0.64 >= default threshold 0.6
+    keys = FakeKeys(["up", "up", "down"])
+    monkeypatch.setattr(demo.cheese_bars, "Keys", lambda: keys)
+    asyncio.run(demo.tune_threshold(display))
+    assert keys.closed is True                  # the reader is always cleaned up
+    assert display.threshold == 0.65            # +0.05 +0.05 -0.05
+    assert display.verdict == {"talking": False}  # 0.64 < 0.65: decision flipped
+
+
+def test_tune_threshold_raises_on_ctrl_c(demo, monkeypatch):
+    display = FakeDisplay()
+    demo.show_wave(wave(cheese_p=0.9), FakeSession(), display)
+    keys = FakeKeys(["ctrl-c"])
+    monkeypatch.setattr(demo.cheese_bars, "Keys", lambda: keys)
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(demo.tune_threshold(display))
+    assert keys.closed is True
 
 
 def test_error_state_maps_exception_types(demo):
@@ -444,3 +513,18 @@ def test_render_keeps_header_then_results_then_diagnostics_and_log(demo):
     assert "Sense cheese demo" in texts[0]
     assert texts[1].startswith("  mic |")
     assert texts[2:] == ["diagnostic", "line 1", "line 2"]
+
+
+def test_render_debug_inserts_bars_between_status_and_diagnostics(demo):
+    d = display_with(demo, debug=True, level=0.5, blocks=3)
+    d.wave = wave()
+    d.diagnostic = "diagnostic"
+    d.render()
+    panel = d.live.updates[-1].renderables[2]
+    assert panel.renderables[0].plain.startswith("  confidence threshold 0.60")
+    sections = {group.renderables[0].plain.split(" →")[0].strip(): group
+                for group in panel.renderables[1:]}
+    assert set(sections) == {"speech", "cheese", "cheese type", "feeling"}
+    bar_rows = [row.plain for group in sections.values() for row in group.renderables[1:]]
+    assert all("┃" in row for row in bar_rows)  # the threshold marker on every bar
+    assert d.live.updates[-1].renderables[3].plain == "diagnostic"
