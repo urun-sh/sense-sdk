@@ -29,9 +29,10 @@ def stage_examples(python_root: Path) -> None:
             line.replace("import cheese_bars", "from . import cheese_bars", 1)
             if line.startswith("import cheese_bars")
             else line
-            for line in demo.read_text().splitlines()
+            for line in demo.read_text(encoding="utf-8").splitlines()
         )
-        + "\n"
+        + "\n",
+        encoding="utf-8",
     )
 
 
