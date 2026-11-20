@@ -859,6 +859,41 @@ describe("turn-terminal visibility", () => {
     expect(types).not.toContain("response.done");
     await s.close();
   });
+
+  // prod lax 2026-11-20: the member ends a long-lived cadence response at its
+  // 300 s response lifetime bound with status incomplete. `response.incomplete`
+  // is a TERMINAL event; when the SDK ignored it the turn stayed open forever —
+  // the run loop never re-opened, the server had no open response to put waves
+  // into, and the session sat silent with the socket healthy (no error event).
+  test("response.incomplete is a terminal: closes the turn so the next input re-opens", async () => {
+    const waitFor = async (check: () => boolean, ms = 2_000): Promise<void> => {
+      for (let i = 0; i < ms / 25 && !check(); i++) await new Promise((r) => setTimeout(r, 25));
+      if (!check()) throw new Error("condition not met in time");
+    };
+    const w = new FakeWire();
+    const s = new Session({ apiKey: "k", questions: QUESTIONS, wireFactory: () => Promise.resolve(w as never) });
+    await s.connect();
+    const events: SessionEvent[] = [];
+    s.onEvent((ev) => events.push(ev));
+    void (async () => {
+      for await (const _ of s.run()) {
+        // discard; the loop must keep turning
+      }
+    })();
+    s.emitAudio(toB64(new Uint8Array(960)));
+    await waitFor(() => sentHas(w, "response.create"), 2_000);
+    // The member's response lifetime bound: one delta, then the incomplete
+    // terminal — never a completed/done frame.
+    w.emit({ type: "response.output_text.delta", delta: "x\n" });
+    w.emit({ type: "response.incomplete", response: { id: "r1", status: "incomplete" } });
+    expect(events.some((e) => e.type === "response.incomplete")).toBe(true);
+    // The turn is closed, so the next audio must re-open it.
+    w.sent.length = 0;
+    s.emitAudio(toB64(new Uint8Array(960)));
+    await waitFor(() => sentHas(w, "response.create"), 2_000);
+    expect(s.stats.turns).toBe(2);
+    await s.close();
+  });
 });
 
 describe("out of credits", () => {

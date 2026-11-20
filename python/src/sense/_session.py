@@ -1052,7 +1052,20 @@ class Session:
         kind = data["type"]
         if kind in ("response.output_text.delta", "response.text.delta"):
             self._line_buf += str(data.get("delta") or "")
-        elif kind in ("response.completed", "response.done", "response.failed"):
+        elif kind in (
+            "response.completed",
+            "response.done",
+            "response.failed",
+            "response.cancelled",
+            "response.incomplete",
+        ):
+            # ALL five are terminals (OpenAI Realtime wire contract). An
+            # unhandled `response.incomplete` (the member ends a long-lived
+            # cadence response at its 300 s lifetime bound with status
+            # incomplete, lax prod 2026-11-20) left the turn open forever:
+            # the run loop never re-opened, the server had no open response
+            # to put waves into, and the session sat silent with the socket
+            # healthy — no error event, nothing to redial on.
             async for wave in self._complete_turn(asm):
                 yield wave
             self._turn_open = False

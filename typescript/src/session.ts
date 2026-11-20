@@ -662,14 +662,18 @@ export class Session {
       this.onDeltaMessage(msg);
       return true;
     }
-    if (type === "response.completed" || type === "response.done" || type === "response.failed" || type === "response.cancelled") {
+    if (type === "response.completed" || type === "response.done" || type === "response.failed" || type === "response.cancelled" || type === "response.incomplete") {
       this.onTurnCompleted();
-      // Normal completion (done/completed) is run-loop bookkeeping. FAILED
-      // and CANCELLED are turn VERDICTS the app must see: the console's
-      // Apply flow barges in (response.cancel) and needs the server's
-      // settlement before it re-asks, and a failed turn was previously
-      // INVISIBLE — the plain `error` event path surfaces to listeners, the
-      // GA response.failed terminal did not.
+      // Normal completion (done/completed) is run-loop bookkeeping. FAILED,
+      // CANCELLED and INCOMPLETE are turn VERDICTS the app must see: the
+      // console's Apply flow barges in (response.cancel) and needs the
+      // server's settlement before it re-asks, and a failed turn was
+      // previously INVISIBLE — the plain `error` event path surfaces to
+      // listeners, the GA response.failed terminal did not. INCOMPLETE is
+      // the member's response lifetime bound ending a long-lived cadence
+      // response (lax prod 2026-11-20): unhandled, the turn stayed open
+      // forever — no re-open, no open response to put waves into, silence
+      // with the socket healthy.
       return type === "response.done" || type === "response.completed";
     }
     if (type === "error") {
