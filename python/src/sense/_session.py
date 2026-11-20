@@ -110,6 +110,16 @@ PRESENCE_CADENCE_S = 10.0
 #: adapter that rejects one with ``unknown_event`` gets it muted for the
 #: rest of that connection (liveness still comes from audio frames).
 _KEEPALIVE_EVENTS = frozenset({"session.presence", "ping"})
+
+# The five OpenAI Realtime turn terminals (see _handle_wire_event for why each
+# must close the turn and which surface to the app).
+_RESPONSE_TERMINALS = frozenset({
+    "response.completed",
+    "response.done",
+    "response.failed",
+    "response.cancelled",
+    "response.incomplete",
+})
 _UNKNOWN_EVENT_RE = re.compile(r"event type\s+(\S+)\s+is not supported")
 
 __all__ = ["AttachHandle", "Session", "SessionStats"]
@@ -1052,13 +1062,7 @@ class Session:
         kind = data["type"]
         if kind in ("response.output_text.delta", "response.text.delta"):
             self._line_buf += str(data.get("delta") or "")
-        elif kind in (
-            "response.completed",
-            "response.done",
-            "response.failed",
-            "response.cancelled",
-            "response.incomplete",
-        ):
+        elif kind in _RESPONSE_TERMINALS:
             # ALL five are terminals (OpenAI Realtime wire contract). An
             # unhandled `response.incomplete` (the member ends a long-lived
             # cadence response at its 300 s lifetime bound with status
