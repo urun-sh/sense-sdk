@@ -574,6 +574,55 @@ def test_wire_text_only_session():
     asyncio.run(go())
 
 
+# ---------------------------------------------------------------------------
+# prod lax 2026-11-20: a long-lived cadence response ends status=incomplete
+# (the member's 300 s response lifetime bound). `response.incomplete` is a
+# TERMINAL event — the turn must close so the next input re-opens it, or the
+# session goes silent: socket open, audio flowing in, zero waves, no error.
+# ---------------------------------------------------------------------------
+
+
+def test_wire_incomplete_response_reopens_turn():
+    async def go():
+        state = {"creates": 0}
+
+        async def handler(request):
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            async for msg in ws:
+                if msg.type is not WSMsgType.TEXT:
+                    break
+                ev = json.loads(msg.data)
+                if ev["type"] == "response.create":
+                    state["creates"] += 1
+                    delta = dec("finished", 0, "true", {"true": 0.9, "false": 0.1}, 0.9) + "\n"
+                    await ws.send_json({"type": "response.output_text.delta", "delta": delta})
+                    # The member's response lifetime bound ends the turn visibly
+                    # with status incomplete — never a completed/done frame.
+                    await ws.send_json({"type": "response.incomplete"})
+
+        runner, port = await _start_fake(handler)
+        try:
+            s = Session(api_key="sk-test", base_url=f"http://127.0.0.1:{port}")
+            _register(s)
+            got = []
+            task = asyncio.create_task(_consume(s, got))
+            s._text_in.push("Say one thing.")
+            await _wait_until(lambda: state["creates"] >= 1)
+            s._text_in.push("Say another thing.")
+            await _wait_until(lambda: state["creates"] >= 2)
+            task.cancel()
+            await s.close()
+            assert state["creates"] >= 2, (
+                "a response.incomplete terminal must close the turn so the next "
+                f"input re-opens it (got {state['creates']} response.create(s))"
+            )
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(go())
+
+
 def test_close_cancels_tracked_tasks():
     async def go():
         s = Session(api_key="sk-test")
