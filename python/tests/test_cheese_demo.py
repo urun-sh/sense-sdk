@@ -95,7 +95,8 @@ def wave(**overrides):
         "cheese_p": 0.9,
         "kind": "brie",
         "kind_p": 0.9,
-        "feeling": "Loves it",
+        # The registered level description for "Loves it" (FEELING_LABELS key).
+        "feeling": "Loves it — excited, upbeat voice, praises it, says it is their favourite",
         "feeling_p": 0.9,
         "feeling_score": 3.9,
     }

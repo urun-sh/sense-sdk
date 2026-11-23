@@ -40,6 +40,7 @@ def panel(entries, threshold, labels=None):
 
 def section(label, result, threshold, labels=None):
     """One question: its selected answer, then a bar per possible answer."""
+    labels = labels or {}
     header = Text(no_wrap=True)
     header.append(f"  {label}", style="bold")
     header.append(f" → {labels.get(result.top, result.top)}", style="cyan")
