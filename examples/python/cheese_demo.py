@@ -29,6 +29,16 @@ from sense import Sense, SenseUnavailable
 SAMPLE_RATE = 24000   # the SDK speaks 24 kHz PCM16 mono
 CHUNK_MS = 40         # like a live mic cadence
 FEELING_EMOJI = {"Disgusted": "🧀🤮", "Dislikes it": "🧀🙁", "Neutral": "🧀😐", "Likes it": "🧀🙂", "Loves it": "🧀❤️"}
+# The score's levels are Jev-style descriptions (low end first) — phrased as
+# how the speaker SOUNDS, since the model hears audio, not faces; these map
+# each level description back to its label for display.
+FEELING_LABELS = {
+    "Disgusted — voice revolted, gagging or puking sounds, yuk, smells gross, would never eat it again": "Disgusted",
+    "Dislikes it — flat and reluctant tone with negative comments": "Dislikes it",
+    "Neutral — just states facts about the cheese without positive or negative comments": "Neutral",
+    "Likes it — bright tone, says it is good, mentions enjoying it, mmmm sounds": "Likes it",
+    "Loves it — excited, upbeat voice, praises it, says it is their favourite": "Loves it",
+}
 BLOCKSIZE = SAMPLE_RATE * CHUNK_MS // 1000  # 960 samples per callback
 USE_PIPEWIRE = sys.platform.startswith("linux")
 
@@ -41,21 +51,24 @@ kind = app.choice(
     "cheese_type",
     instructions="Which type of cheese are they talking about?",
     criteria={
-        "cheddar": "Firm yellow cheese",
+        "cheddar": "Classic English cheese",
         "brie": "Soft white-rind cheese",
-        "gouda": "Semi-hard Dutch cheese",
-        "parmesan": "Hard aged grating cheese",
+        "gouda": "Semi-hard cheese",
+        "parmesan": "Hard, aged, grating cheese",
         "camembert": "Soft bloomy-rind cheese",
-        "mozzarella": "Stretchy fresh cheese",
-        "blue": "Veined blue cheese",
+        "mozzarella": "Stretchy creamy fresh cheese",
+        "blue": "Any blue cheese",
         "feta": "Crumbly brined cheese",
-        "other": "Any other kind of cheese",
+        "goat": "Any goat cheese",
+        "French": "Any other French like comte, reblochon, munster, époisses, morbier, saint-nectaire, tomme de savoie",
+        "Italian": "Any other Italian like pecorino, taleggio, asiago, provolone, scamorza, stracchino, burrata, caciocavallo, ricotta, gorgonzola",
+        "other": "Any other kind of cheese not listed",
     },
 )
 feeling = app.score(
     "feeling",
     instructions="How does the speaker feel about that cheese?",
-    criteria=["Disgusted", "Dislikes it", "Neutral", "Likes it", "Loves it"],
+    criteria=list(FEELING_LABELS),
 )
 # --debug panel rows: display label, question id.
 DEBUG_QUESTIONS = (("speech", "speech"), ("cheese", "cheese"),
@@ -88,7 +101,7 @@ def decide(display):
         sentiment = wave.result("feeling")
         display.verdict.update(
             kind=cheese_type.value if cheese_type.p_option(cheese_type.value) >= threshold else "unknown type",
-            feeling=sentiment.top if sentiment.p >= threshold else "Neutral",
+            feeling=FEELING_LABELS.get(sentiment.top, "Neutral") if sentiment.p >= threshold else "Neutral",
             score=sentiment.value,
             p=detection.p,
         )
@@ -390,7 +403,7 @@ class Display:
         log_lines = [Text(line, style="dim") for line in self.log]
         renderables = [header, status]
         if self.debug:
-            bars = cheese_bars.panel(self.debug_entries(), self.threshold)
+            bars = cheese_bars.panel(self.debug_entries(), self.threshold, FEELING_LABELS)
             if bars is not None:
                 renderables.append(bars)
         renderables.append(Text(self.diagnostic, style="dim"))
