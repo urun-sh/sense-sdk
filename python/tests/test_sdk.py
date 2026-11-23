@@ -1031,17 +1031,25 @@ def test_dial_402_is_out_of_credits():
     asyncio.run(go())
 
 
-def test_explicit_presence_frames(monkeypatch):
-    """Explicit presence: the SDK sends {"type":"session.presence"} every 10 s
-    while the app is active (idle window 60 s), stops when the window lapses,
-    and keepalive() re-asserts. Cadence/idle shortened via module constants."""
+def test_keepalive_frames_never_stop_on_an_idle_connection(monkeypatch):
+    """Keepalive: ``{"type":"session.presence"}`` every cadence for the life of
+    the wire — with no app activity at all, and even after the adapter rejects
+    the type with ``unknown_event``.
+
+    Regression (prod hub lane 2026-11-23): a quiet client's member leg was
+    released at ~45 s. The old 60 s activity window stopped the cadence, and a
+    rejection muted the type for the rest of the connection — either way the
+    lane went silent, and every hop that drops a quiet leg (celld: 15 s ping +
+    30 s pong deadline; the member's SFU attach read deadline: 45 s) fired."""
     import sense._session as sess_mod
 
     monkeypatch.setattr(sess_mod, "PRESENCE_CADENCE_S", 0.05)
-    monkeypatch.setattr(sess_mod, "PRESENCE_IDLE_S", 0.4)
+    # The activity window is gone; a stale module that still carries one must
+    # not stop the cadence (raising=False keeps the test valid on both).
+    monkeypatch.setattr(sess_mod, "PRESENCE_IDLE_S", 0.15, raising=False)
 
     async def go():
-        state = {"types": []}
+        state = {"types": [], "rejected": False}
 
         async def handler(request):
             ws = web.WebSocketResponse()
@@ -1053,14 +1061,18 @@ def test_explicit_presence_frames(monkeypatch):
                 state["types"].append(ev["type"])
                 if ev["type"] == "session.update":
                     await ws.send_json({"type": "error", "error": {"code": "empty_buffer"}})
-                elif ev["type"] == "response.create":
+                elif ev["type"] == "session.presence" and not state["rejected"]:
+                    # An adapter that does not speak the keepalive type.
+                    state["rejected"] = True
                     await ws.send_json(
                         {
-                            "type": "response.output_text.delta",
-                            "delta": dec("finished", 0, "true", {"true": 1.0, "false": 0.0}, 1.0) + "\n",
+                            "type": "error",
+                            "error": {
+                                "code": "unknown_event",
+                                "message": "event type session.presence is not supported by this adapter",
+                            },
                         }
                     )
-                    await ws.send_json({"type": "response.completed"})
 
         runner, port = await _start_fake(handler)
         try:
@@ -1069,29 +1081,20 @@ def test_explicit_presence_frames(monkeypatch):
             got = []
             task = asyncio.create_task(_consume(s, got))
 
-            async def presences():
+            def presences():
                 return state["types"].count("session.presence")
 
-            # App activity keeps the window open: frames flow every cadence.
-            s._text_in.push("still here")
-            await _wait_until(lambda: state["types"].count("session.presence") >= 2)
-            # The wire frame is exactly the presence marker, no extra fields.
-            s.keepalive()
-            await _wait_until(lambda: state["types"].count("session.presence") >= 3)
-            # Idle past the window: the cadence goes quiet (explicit detach).
-            # Baseline only once the cadence has stopped ticking (the 0.4 s
-            # window from the keepalive has lapsed) — a mid-cadence count
-            # would race the next frame.
-            prev = -1
-            while state["types"].count("session.presence") != prev:
-                prev = state["types"].count("session.presence")
-                await asyncio.sleep(0.1)
-            n = prev
-            await asyncio.sleep(0.7)
-            assert state["types"].count("session.presence") == n
-            # A fresh app send re-asserts presence.
-            s._text_in.push("back")
-            await _wait_until(lambda: state["types"].count("session.presence") >= n + 1)
+            # No app activity at all: the cadence alone keeps the lane fed.
+            await _wait_until(lambda: presences() >= 2)
+            assert presences() >= 2
+
+            # The adapter rejected the type above; the cadence must continue —
+            # going quiet is what loses the member.
+            await _wait_until(lambda: state["rejected"])
+            n = presences()
+            await _wait_until(lambda: presences() >= n + 3)
+            assert presences() >= n + 3
+
             task.cancel()
             await s.close()
         finally:

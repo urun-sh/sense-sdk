@@ -32,6 +32,17 @@ The QUIC control stream uses a four-byte little-endian body length followed by M
 
 Python's QUIC and WebRTC dependencies ship with the base install (`pip install urun-sense`); the auto transport order (quic → webrtc → ws) needs no extras. TypeScript detects WebTransport and RTCPeerConnection availability at runtime: Node dials QUIC through the `@fails-components/webtransport` ponyfill when the global is missing, which additionally needs its `@fails-components/webtransport-transport-http3-quiche` binding package (optional install — it carries a compile lifecycle script, so the SDK ships it as no dependency and degrades to WebSocket without it); Node WebRTC stays on WebSocket (no prebuilt W3C-shaped stack interops with the SFU). Its WebSocket implementation requires header authentication and does not support browser WebSocket fallback. These transport options do not imply that every runtime supports every SDK entry point.
 
+### 1.1 Keeping a quiet connection alive
+
+An open realtime connection must not go silent. The service closes a connection that has nothing inbound for about 45 seconds: the edge sends a WebSocket protocol ping every 15 seconds and drops a peer that answers nothing for 30 seconds after one. Any inbound frame resets that clock — the automatic pong, a client-sent WebSocket ping, or any text/binary message — and an application event is the frame every layer counts, including the member leg that serves the session.
+
+If you talk to the service without an SDK, follow these rules:
+
+- **Send audio or any JSON event at least every 20 seconds.** Any valid event works; the SDKs send `{"type": "session.presence"}` every 10 seconds for the life of the connection. An idle connection with nothing inbound for about 45 seconds may be closed.
+- **Let your WebSocket stack answer protocol pings.** Browsers and the common client libraries (`ws`, `aiohttp`, `websockets`, OkHttp, URLSession) pong automatically. A client that disables automatic pong, or whose read/event loop is blocked for more than 30 seconds, is dropped even though its socket looks open.
+- **Reconnect after a suspend.** A backgrounded tab, a phone app suspended by the OS, or a process paused by the debugger cannot pong and cannot send keepalives, so it will be closed; dial again rather than assuming the old socket is live.
+- **WebTransport/QUIC needs none of this** beyond its own transport keepalive and the control stream's `ping`/`pong` (§1); the rules above cover the WebSocket (and OpenAI-Realtime-compatible) path.
+
 ## 2. Handshake and question registration
 
 After connecting, the SDK sends `session.update`. `instructions` is a **JSON string**, not a nested object:
@@ -298,4 +309,4 @@ The shared conformance cases `score_bare_gte` and `score_bare_eq_top` exercise t
 
 ### 8.3 Input-driven turns
 
-The SDK does not generate silent audio or periodic text to keep model decisions flowing. Text can start a turn without audio, but applications should not depend on an idle session producing waves indefinitely. This is distinct from transport-level keepalive messages such as the QUIC control stream's `ping`/`pong`.
+The SDK does not generate silent audio or periodic text to keep model decisions flowing. Text can start a turn without audio, but applications should not depend on an idle session producing waves indefinitely. This is distinct from the connection keepalive in §1.1 and the QUIC control stream's `ping`/`pong`: those keep the transport alive and never produce waves.

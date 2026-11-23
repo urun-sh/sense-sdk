@@ -29,20 +29,22 @@ const MAX_QUEUED_WAVES = 512;
  * the oldest is dropped beyond this (Python parity). */
 const MAX_PENDING_AUDIO_CHUNKS = 1500;
 
-/** Explicit presence (owner GO 2026-11-16, hub-primary): the proxy holds a
- * pooled seat only while the client says it is present. The signal is the
- * `{"type":"session.presence"}` frame on the realtime event channel, sent
- * every PRESENCE_CADENCE_MS while `Date.now() - lastActivityAt` is inside
- * the 60 s idle window; an idle lapse stops the frames (an explicit detach —
- * the runtime's #3439 governor then PARKS the seat, it never dies), and the
- * next app-level send re-asserts it. A visible browser tab is NOT activity
- * (owner ruling): only real app sends and keepalive() count. */
-const PRESENCE_IDLE_MS = 60_000;
+/** Keepalive cadence on an open realtime connection. An idle client must never
+ * go quiet: celld (the edge) closes a socket whose peer sends nothing inbound
+ * for 45 s (a WS protocol ping every 15 s, a 30 s pong deadline), the hub
+ * relay's liveness keys on inbound client frames, and the member's SFU attach
+ * closes its leg after 45 s without one. Pongs cover the edge only — they are
+ * transport frames discarded below the relay and the attach — and a stalled or
+ * suspended client event loop answers no pongs at all. So the session sends
+ * ONE application-level frame, `{"type":"session.presence"}`, every
+ * PRESENCE_CADENCE_MS for the life of the connection: an ordinary event on
+ * every transport (the same sendJson path as all app events), counted as
+ * activity by every hop. */
 const PRESENCE_CADENCE_MS = 10_000;
 
-/** Keepalive event types the SDK itself sends on the realtime lane. An
- * adapter that rejects one with `unknown_event` gets it muted for the rest
- * of that connection (liveness still comes from audio frames). */
+/** Keepalive event types the SDK itself sends on the realtime lane. An adapter
+ * that does not speak one answers `unknown_event` — benign, and it does NOT
+ * silence the cadence (a quiet lane is dropped; a stray error event is not). */
 const KEEPALIVE_EVENTS: Record<string, true> = {
   "session.presence": true,
   ping: true,
@@ -190,9 +192,8 @@ export class Session {
   /** Set only for OutOfCreditsError terminal ends: run()/waves() throw it
    * instead of ending quietly (other fatal ends keep ending quietly). */
   private fatalErr: OutOfCreditsError | null = null;
-  /** Last app-level send (audio/video/text push, barge-in, setQuestions,
-   * keepalive). A freshly created session is present until this lapses. */
-  private lastActivityAt = Date.now();
+  /** The presence cadence (started once the wire is installed, stopped by
+   * close()). */
   private presenceTimer: ReturnType<typeof setInterval> | null = null;
   /** The session drive (dial + turn-open loop): started once, by whichever of
    * attach()/run() runs first. */
@@ -200,9 +201,10 @@ export class Session {
   private driveWaiters: (() => void)[] = [];
   /** A dial already in flight; a second connect() joins it instead of double-dialing. */
   private connecting: Promise<void> | null = null;
-  /** Keepalive event types the current adapter has rejected with
-   * `unknown_event` (per connection; reset on every dial). */
-  private mutedKeepalive = new Set<string>();
+  /** Keepalive event types the current adapter has already answered with
+   * `unknown_event` (per connection; reset on every dial). Only the debug log
+   * is deduped — the cadence keeps sending. */
+  private keepaliveReported = new Set<string>();
   /** Client-chosen sticky id for /v1/realtime/calls dials (?dcid): stable
    * per session so a reconnect re-binds to the same member. */
   private readonly dcid = crypto.randomUUID();
@@ -242,7 +244,6 @@ export class Session {
    * barges in FIRST: an envelope sent while a response is streaming wedges
    * the lane; cancel, then latch the new schema for the reopened turn. */
   setQuestions(questions: Question[]): void {
-    this.touch();
     this.registry = [];
     for (const q of questions) this.addQuestionRaw(q);
     this.bargeIn();
@@ -260,33 +261,28 @@ export class Session {
     return `${this.baseUrl.replace(/\/+$/, "")}/v1/realtime?model=${encodeURIComponent(this.model)}`;
   }
 
-  // ---- explicit presence --------------------------------------------------
+  // ---- keepalive ----------------------------------------------------------
 
-  /** Stamp app-level activity: every public send and keepalive() routes here. */
-  private touch(): void {
-    this.lastActivityAt = Date.now();
-  }
+  /** No-op, kept for API compatibility. The session keeps the connection
+   * alive by itself: it sends `{"type":"session.presence"}` every
+   * PRESENCE_CADENCE_MS for as long as the wire is open, so an app that is
+   * alive but sending nothing needs no call. */
+  keepalive(): void {}
 
-  /** App-level presence assertion: refreshes the activity window without a
-   * media payload. Call this when the app is alive but sending nothing. */
-  keepalive(): void {
-    this.touch();
-  }
-
-  /** Start the 10 s presence cadence (once per session, across redials).
-   * A tick inside the idle window sends `{"type":"session.presence"}` on the
-   * event channel (every transport carries it — the same sendJson path as
-   * all app events); a lapsed window sends nothing. */
+  /** Start the 10 s keepalive cadence (once per session, across redials).
+   * A tick sends `{"type":"session.presence"}` on the event channel (every
+   * transport carries it — the same sendJson path as all app events); the
+   * cadence stops only when the session closes. */
   private startPresence(): void {
     if (this.presenceTimer !== null || this.isClosed) return;
     this.presenceTimer = setInterval(() => this.presenceTick(), PRESENCE_CADENCE_MS);
   }
 
-  /** One presence cadence tick: send `{"type":"session.presence"}` while the
-   * app is inside the idle window and the adapter has not muted the type. */
+  /** One keepalive tick: the wire carries an application-level frame so no hop
+   * can mistake an open-but-quiet connection for a dead one. A rejected type
+   * (`unknown_event`) is expected and must not stop the cadence. */
   private presenceTick(): void {
-    if (this.mutedKeepalive.has("session.presence")) return;
-    if (Date.now() - this.lastActivityAt < PRESENCE_IDLE_MS) this.sendJson({ type: "session.presence" });
+    this.sendJson({ type: "session.presence" });
   }
 
   private stopPresence(): void {
@@ -299,7 +295,6 @@ export class Session {
 
   /** @internal */
   emitAudio(b64: string, source?: string): void {
-    this.touch();
     if (source !== undefined && source !== "default") {
       let queue = this.sourceQueues.get(source);
       if (!queue) {
@@ -348,7 +343,6 @@ export class Session {
 
   /** @internal One JPEG frame (Uint8Array or ArrayBuffer). */
   emitVideo(jpeg: Uint8Array | ArrayBuffer): void {
-    this.touch();
     if (jpeg.byteLength > MAX_FRAME_BYTES) {
       throw new ProtocolError("frame_too_large", `frame ${jpeg.byteLength}B > ${MAX_FRAME_BYTES}B`);
     }
@@ -366,7 +360,6 @@ export class Session {
   /** @internal Text context for the model: append/replace the transcript, or
    * a one-shot event text. */
   emitText(text: string, mode: TextMode): void {
-    this.touch();
     this.inputSinceTurn++;
     if (mode === "event") {
       this.oneShotText.push(text);
@@ -426,7 +419,6 @@ export class Session {
   /** Barge-in: stop the active turn's cadence. @internal — Context.cancel
    * and setQuestions barge in; apps call ctx.cancel(key). */
   bargeIn(): void {
-    this.touch();
     this.sendJson({ type: "response.cancel" });
     this.turnOpen = false;
   }
@@ -502,7 +494,7 @@ export class Session {
     this.connectedAt = Date.now();
     this.streamsEnded = false;
     this.wedgeRefusals = 0;
-    this.mutedKeepalive.clear(); // new connection: the adapter may speak them now
+    this.keepaliveReported.clear(); // new connection: report a rejection once again
     // A fresh server session has no in-flight response: a backoff earned on
     // the old wire must not delay the first turn on the new one.
     this.reopenNotBefore = 0;
@@ -763,17 +755,22 @@ export class Session {
 
   /** An `unknown_event` naming one of the SDK's own keepalive types
    * (`session.presence`, `ping`) is expected on adapters that don't speak
-   * them: mute that type for the rest of the connection (liveness still
-   * comes from audio frames), log at debug, don't count it as an error.
-   * Any other unknown_event falls through loud. */
+   * them. Benign, and it must NOT silence the cadence: a lane with nothing
+   * inbound is closed at ~45 s by the edge, the relay and the member attach
+   * (see PRESENCE_CADENCE_MS). A stray error event costs nothing; a quiet
+   * lane costs the member. Debug-log the first rejection per type per
+   * connection only, don't count it as an error. Any other unknown_event
+   * falls through loud. */
   private onUnknownKeepalive(err: Record<string, unknown> | undefined): boolean {
     const message = typeof err?.message === "string" ? err.message : "";
     const match = /event type\s+(\S+)\s+is not supported/.exec(message);
     if (match === null) return false;
     const type = match[1]!;
     if (!(type in KEEPALIVE_EVENTS)) return false;
-    this.mutedKeepalive.add(type);
-    console.debug(`[sense] adapter does not support keepalive event ${type}; muted for this connection`);
+    if (!this.keepaliveReported.has(type)) {
+      this.keepaliveReported.add(type);
+      console.debug(`[sense] adapter does not support keepalive event ${type}; the keepalive cadence continues regardless`);
+    }
     return true;
   }
 
