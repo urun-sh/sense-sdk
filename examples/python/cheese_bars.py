@@ -1,6 +1,7 @@
-"""--debug support for the cheese demo: horizontal probability bars with
-the decision threshold marked, and the key presses that tune it. Kept out
-of the demo so that file stays about the Sense API.
+"""Chart support for the cheese demo (shown by default; hidden with --no-chart):
+horizontal probability bars with the decision threshold marked, and the key
+presses that tune it. Kept out of the demo so that file stays about the Sense
+API.
 """
 
 import asyncio
@@ -12,7 +13,7 @@ from rich.text import Text
 
 STEP = 0.05           # threshold change per key press
 BAR_WIDTH = 32        # bar cells spanning probability 0.0 .. 1.0
-LABEL_WIDTH = 12      # answer-label column width
+LABEL_WIDTH = 12      # answer-label column width (short labels; full level descriptions stay off the chart)
 EIGHTHS = " ▏▎▍▌▋▊▉"   # partial blocks for a bar's fractional tail cell
 ARROWS = {"A": "up", "B": "down", "C": "right", "D": "left"}
 
@@ -26,24 +27,37 @@ def adjust(key, threshold):
     return min(1.0, max(0.0, round(threshold + delta, 2)))
 
 
-def panel(entries, threshold):
+def panel(entries, threshold, labels=None):
     """A bar per answer of every question, the threshold marked on each;
-    ``entries`` are (label, result) pairs."""
+    ``entries`` are (label, result) pairs; ``labels`` optionally maps an
+    answer to a shorter bar-chart label."""
     if not entries:
         return None
     header = Text(f"  confidence threshold {threshold:.2f} · ↑/↓ tune live", style="dim")
-    return Group(header, *(section(label, result, threshold) for label, result in entries))
+    labels = labels or {}
+    return Group(header, *(section(label, result, threshold, labels) for label, result in entries))
 
 
-def section(label, result, threshold):
+def section(label, result, threshold, labels=None):
     """One question: its selected answer, then a bar per possible answer."""
+    labels = labels or {}
     header = Text(no_wrap=True)
     header.append(f"  {label}", style="bold")
-    header.append(f" → {result.top}", style="cyan")
-    p_top = result.p if result.p is not None else 0.0
-    header.append(f" ({p_top:.2f})", style="dim")
-    return Group(header, *(row(answer, p, str(answer) == str(result.top), threshold)
+    header.append(f" → {labels.get(result.top, result.top)}", style="cyan")
+    header.append(f" ({_p_selected(result):.2f})", style="dim")
+    return Group(header, *(row(labels.get(answer, answer), p, str(answer) == str(result.top), threshold)
                            for answer, p in answers(result)))
+
+
+def _p_selected(result):
+    """The selected answer's probability: for a noul, ``result.p`` is P(true),
+    not P(the selected answer), so read it from the distribution; ``result.p``
+    is the fallback when the distribution is missing."""
+    distribution = result.distribution or {}
+    for answer, p in distribution.items():
+        if str(answer) == str(result.top):
+            return p
+    return result.p if result.p is not None else 0.0
 
 
 def answers(result):

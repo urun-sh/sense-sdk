@@ -38,7 +38,7 @@ python -m sense.examples.cheese_demo
 
 Wait for the connection, select your mic, and start talking to Sense.
 
-Run it with `--debug` to see every answer's probability as horizontal bars and tune the decision threshold live with the arrow keys.
+It shows every answer's probability as horizontal bars and tunes the decision threshold live with the arrow keys (hide them with `--no-chart`).
 
 ## Python example walk-through
 
@@ -119,7 +119,7 @@ Audio pushes and wave consumption must both make progress — a blocking wave lo
   - The expected index value in `.value`, in this case (0..4) across 5 levels.
   - Cumulative tail probabilities in `.p_at_least(level)` — a zero-based index or the exact level description.
 
-You will usually want to gate actions on the probability (the demo gates at p >= 0.33 — tune it live with --debug):
+You will usually want to gate actions on the probability (the demo gates at p >= 0.33 — tune it live with the arrow keys):
 
 ```python
 speaking = bool(wave.result("speech").value)
