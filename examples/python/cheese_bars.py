@@ -44,10 +44,20 @@ def section(label, result, threshold, labels=None):
     header = Text(no_wrap=True)
     header.append(f"  {label}", style="bold")
     header.append(f" → {labels.get(result.top, result.top)}", style="cyan")
-    p_top = result.p if result.p is not None else 0.0
-    header.append(f" ({p_top:.2f})", style="dim")
+    header.append(f" ({_p_selected(result):.2f})", style="dim")
     return Group(header, *(row(labels.get(answer, answer), p, str(answer) == str(result.top), threshold)
                            for answer, p in answers(result)))
+
+
+def _p_selected(result):
+    """The selected answer's probability: for a noul, ``result.p`` is P(true),
+    not P(the selected answer), so read it from the distribution; ``result.p``
+    is the fallback when the distribution is missing."""
+    distribution = result.distribution or {}
+    for answer, p in distribution.items():
+        if str(answer) == str(result.top):
+            return p
+    return result.p if result.p is not None else 0.0
 
 
 def answers(result):

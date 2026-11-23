@@ -582,3 +582,10 @@ def test_render_debug_inserts_bars_between_status_and_diagnostics(demo):
     bar_rows = [row.plain for group in sections.values() for row in group.renderables[1:]]
     assert all("┃" in row for row in bar_rows)  # the threshold marker on every bar
     assert d.live.updates[-1].renderables[3].plain == "diagnostic"
+
+
+def test_noul_bar_header_shows_selected_answer_probability(demo):
+    # p is P(true), so a noul answering false at p=0.1 must headline (0.90),
+    # the selected answer's own probability, not (0.10).
+    result = demo.cheese_bars.section("speech", wave(speech=False).result("speech"), 0.6)
+    assert "(0.90)" in result.renderables[0].plain
