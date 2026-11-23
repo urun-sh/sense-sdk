@@ -20,7 +20,7 @@ from array import array
 from collections import deque
 from contextlib import suppress
 
-import cheese_bars  # the --debug probability bars
+import cheese_bars  # the probability bars (hidden by --no-chart)
 from rich.console import Group
 from rich.live import Live
 from rich.text import Text
@@ -70,7 +70,7 @@ feeling = app.score(
     instructions="How does the speaker feel about that cheese?",
     criteria=list(FEELING_LABELS),
 )
-# --debug panel rows: display label, question id.
+# bars-panel rows: display label, question id.
 DEBUG_QUESTIONS = (("speech", "speech"), ("cheese", "cheese"),
                     ("cheese type", "cheese_type"), ("feeling", "feeling"))
 
@@ -109,8 +109,8 @@ def decide(display):
 
 
 async def tune_threshold(display):
-    """--debug: ↑/↓ (or +/-) move the confidence threshold; every change
-    re-decides the latest wave."""
+    """↑/↓ (or +/-) move the confidence threshold; every change re-decides
+    the latest wave. Runs unless the chart is hidden with --no-chart."""
     reader = cheese_bars.Keys()
     try:
         await reader.start()
@@ -142,7 +142,7 @@ async def receive_decisions(waves, session, display):
 
 
 async def main(args) -> int:
-    display = Display(debug=args.debug)
+    display = Display(debug=not args.no_chart)
     sense_log = logging.getLogger("sense")
     sense_log.addHandler(LogTail(display))
     sense_log.setLevel(logging.INFO)
@@ -160,7 +160,7 @@ async def main(args) -> int:
         await mic.start()
         tasks = [asyncio.create_task(refresh_status(display, None if args.mic_only else session)),
                  asyncio.create_task(send_audio(mic, session, not args.mic_only))]
-        if args.debug:
+        if not args.no_chart:
             tasks.append(asyncio.create_task(tune_threshold(display)))
         if args.mic_only:
             display.sense_state = "disabled"
@@ -308,12 +308,12 @@ class Display:
         self.diagnostic = ""
         self.log = deque(maxlen=3)         # last SDK log lines, shown below the diagnostic
         self.live = Live(auto_refresh=False)
-        self.debug = debug       # --debug: probability bars + threshold tuning
+        self.debug = debug       # probability bars + threshold tuning (default on)
         self.wave = None         # latest wave, re-decided when the threshold moves
         self.threshold = 0.33    # confidence cut for the talking/kind/feeling decisions
 
     def debug_entries(self):
-        """(label, result) pairs for the --debug bars panel."""
+        """(label, result) pairs for the bars panel."""
         if self.wave is None:
             return []
         return [(label, self.wave.result(qid)) for label, qid in DEBUG_QUESTIONS]
@@ -566,8 +566,8 @@ if __name__ == "__main__":
     parser.add_argument("--device",
                         help="Skip the menu with a device name or ID; auto uses system default")
     parser.add_argument("--mic-only", action="store_true", help="Test microphone without connecting to Sense")
-    parser.add_argument("--debug", action="store_true",
-                        help="Show every answer's probability as horizontal bars and tune the decision threshold live (arrow keys)")
+    parser.add_argument("--no-chart", action="store_true",
+                        help="Hide the probability bar chart and disable live threshold tuning")
     args = parser.parse_args()
     if USE_PIPEWIRE:
         os.environ.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")

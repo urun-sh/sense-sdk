@@ -1,6 +1,7 @@
-"""--debug support for the cheese demo: horizontal probability bars with
-the decision threshold marked, and the key presses that tune it. Kept out
-of the demo so that file stays about the Sense API.
+"""Chart support for the cheese demo (shown by default; hidden with --no-chart):
+horizontal probability bars with the decision threshold marked, and the key
+presses that tune it. Kept out of the demo so that file stays about the Sense
+API.
 """
 
 import asyncio
