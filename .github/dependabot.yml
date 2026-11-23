@@ -2,7 +2,9 @@ version: 2
 updates:
   # Cooldown: pass over versions released less than 7 days ago, so a
   # compromised upstream release is less likely to be adopted before
-  # anyone notices it.
+  # anyone notices it. Version updates only: Dependabot security updates
+  # ignore the cooldown and may still propose a release younger than 7
+  # days.
   - package-ecosystem: github-actions
     directory: /
     schedule:
