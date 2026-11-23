@@ -9,7 +9,7 @@ rules:
     ignore:
       - ci.yml:77
       - ci.yml:86
-      - release.yml:139
-      - release.yml:148
-      - release.yml:448
-      - release.yml:453
+      - release.yml:141
+      - release.yml:150
+      - release.yml:451
+      - release.yml:456
