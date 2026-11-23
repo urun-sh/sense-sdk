@@ -1,0 +1,15 @@
+# zizmor configuration: https://docs.zizmor.sh/configuration/
+# The ci.yml zizmor job fails the build on any finding, so deliberate
+# exceptions are recorded here instead of being worked around in the workflows.
+rules:
+  adhoc-packages:
+    # The clean-consumer jobs install the freshly built wheel or npm tarball
+    # (plus a pinned typescript for the declaration typecheck) into a pristine
+    # directory outside the checkout — by design outside any lockfile.
+    ignore:
+      - ci.yml:77
+      - ci.yml:86
+      - release.yml:139
+      - release.yml:148
+      - release.yml:448
+      - release.yml:453

@@ -107,12 +107,16 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      # No dependency caches here: the tarball packed below is published, and
+      # a poisoned cache entry could otherwise reach the published artifact.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
+          no-cache: true
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+          package-manager-cache: false
       - name: Install dependencies
         run: bun install --cwd typescript --frozen-lockfile
       - name: Build the package (dist JS + rewritten d.ts)
@@ -279,10 +283,13 @@ jobs:
           # Checked out into a subdirectory: a root checkout cleans the workspace
           # and deletes the distributions downloaded above.
           path: src
+      # Same cache-poisoning concern as ts-gate: this rebuild is what npm
+      # publishes, so dependency caching stays off.
       - if: ${{ steps.npm-state.outputs.skip != 'true' }}
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
+          no-cache: true
       - name: Install dependencies and build the package
         if: ${{ steps.npm-state.outputs.skip != 'true' }}
         run: |

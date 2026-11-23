@@ -18,6 +18,7 @@
 - TypeScript checks: `bunx oxlint@1.91.0 && bunx tsc --noEmit && bun test && bun test ../conformance/typescript_runner.ts`.
 - The offline tests use fixtures and local fake servers. Live examples send media to the configured service and can incur charges; run them only when explicitly requested, using credentials from the environment.
 - See `.github/workflows/ci.yml` for duplication and clean-consumer checks. For packaging changes, test the built wheel or npm tarball outside the checkout so local source imports cannot mask missing files.
+- CI audits `.github/workflows/` with zizmor (`uvx zizmor@1.33.1 .`); intentional exceptions live in `.github/zizmor.yml`. A repository Actions policy (Settings → Actions → Policies) restricts workflow triggers to `push`, `pull_request`, and `workflow_dispatch`: a workflow added with any other trigger will not run, so extend the policy before adding one.
 
 ## Packaging and documentation
 
