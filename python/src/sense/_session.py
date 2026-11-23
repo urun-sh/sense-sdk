@@ -1159,8 +1159,8 @@ class Session:
         """Send ``{"type": "session.presence"}`` every cadence for the life of
         the connection. This is the SDK's keepalive: every hop that can drop a
         quiet leg resets on an application-level inbound frame (see
-        PRESENCE_CADENCE_S), and a rejected type is not consented to by
-        going quiet."""
+        PRESENCE_CADENCE_S), and a rejected type never silences it — going
+        quiet is what loses the member."""
         while not self._closed:
             wire = self._wire
             if wire is not None and not wire.closed:
