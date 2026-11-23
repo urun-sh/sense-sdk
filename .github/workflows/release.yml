@@ -107,8 +107,10 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      # No dependency caches here: the tarball packed below is published, and
-      # a poisoned cache entry could otherwise reach the published artifact.
+      # No caches here: the tarball packed below is published, and a poisoned
+      # cache entry or a poisoned toolchain could otherwise reach it. setup-bun's
+      # no-cache disables the Bun-executable cache; setup-node's
+      # package-manager-cache: false disables dependency caching.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
@@ -284,7 +286,8 @@ jobs:
           # and deletes the distributions downloaded above.
           path: src
       # Same cache-poisoning concern as ts-gate: this rebuild is what npm
-      # publishes, so dependency caching stays off.
+      # publishes, so the toolchain cache stays off (setup-bun's no-cache; the
+      # dependency cache is already off via setup-node above).
       - if: ${{ steps.npm-state.outputs.skip != 'true' }}
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
