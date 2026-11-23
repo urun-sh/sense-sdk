@@ -38,7 +38,7 @@ An open realtime connection must not go silent. The service closes a connection 
 
 If you talk to the service without an SDK, follow these rules:
 
-- **Send audio or any JSON event at least every 20 seconds.** Any valid event works; the SDKs send `{"type": "session.presence"}` every 10 seconds for the life of the connection. An idle connection with nothing inbound for about 45 seconds may be closed.
+- **Send audio or any JSON event at least every 20 seconds.** Any valid event works. From SDK version **0.2.9** on, both SDKs send `{"type": "session.presence"}` every 10 seconds for the whole life of the connection, so an SDK session needs nothing from the application. Earlier versions stop sending it once the app has been idle for 60 seconds — on those, send audio or a JSON event yourself at least every 20 seconds, or upgrade. A connection with nothing inbound for about 45 seconds may be closed.
 - **Let your WebSocket stack answer protocol pings.** Browsers and the common client libraries (`ws`, `aiohttp`, `websockets`, OkHttp, URLSession) pong automatically. A client that disables automatic pong, or whose read/event loop is blocked for more than 30 seconds, is dropped even though its socket looks open.
 - **Reconnect after a suspend.** A backgrounded tab, a phone app suspended by the OS, or a process paused by the debugger cannot pong and cannot send keepalives, so it will be closed; dial again rather than assuming the old socket is live.
 - **WebTransport/QUIC needs none of this** beyond its own transport keepalive and the control stream's `ping`/`pong` (§1); the rules above cover the WebSocket (and OpenAI-Realtime-compatible) path.
