@@ -43,7 +43,7 @@ npm install @urun-sh/sense
 
 ## Authenticate with uRun
 
-Make yourself a uRun API key at [urun.sh](https://urun.sh) then use that as your `URUN_API_KEY`:
+Make yourself a [uRun API key](https://docs.urun.sh/docs/console/api-keys) in the [uRun console](https://console.urun.sh/settings/api-keys) then use that as your `URUN_API_KEY`:
 
 ```bash
 export URUN_API_KEY="<urun-api-key>"
