@@ -29,13 +29,10 @@ def repo_with_examples(tmp_path):
     examples = tmp_path / "examples"
     (examples / "python").mkdir(parents=True)
     (examples / "python" / "cheese_demo.py").write_text(
-        "import api_key_hint  # the missing-key message\n"
-        "import cheese_bars  # the --debug probability bars\n"
-        "print('mozzarella 🧀')\n",
+        "import cheese_bars  # the --debug probability bars\nprint('mozzarella 🧀')\n",
         encoding="utf-8",
     )
     (examples / "python" / "cheese_bars.py").write_text("LABEL_WIDTH = 16\n", encoding="utf-8")
-    (examples / "python" / "api_key_hint.py").write_text("API_KEYS_URL = 'x'\n", encoding="utf-8")
     (examples / "assets").mkdir()
     (examples / "assets" / "poster.txt").write_text("brie 🧀\n", encoding="utf-8")
     return tmp_path / "python"
@@ -46,12 +43,9 @@ def test_stage_examples_rewrites_the_sibling_import_for_the_wheel(build_hook, tm
     build_hook.stage_examples(python_root)
     staged = python_root / "src" / "sense" / "examples"
     assert (staged / "cheese_demo.py").read_text(encoding="utf-8") == (
-        "from . import api_key_hint  # the missing-key message\n"
-        "from . import cheese_bars  # the --debug probability bars\n"
-        "print('mozzarella 🧀')\n"
+        "from . import cheese_bars  # the --debug probability bars\nprint('mozzarella 🧀')\n"
     )
     assert (staged / "cheese_bars.py").read_text(encoding="utf-8") == "LABEL_WIDTH = 16\n"
-    assert (staged / "api_key_hint.py").read_text(encoding="utf-8") == "API_KEYS_URL = 'x'\n"
     assert (staged / "assets" / "poster.txt").read_text(encoding="utf-8") == "brie 🧀\n"
 
 

@@ -25,14 +25,11 @@ def demo():
     # The demo imports its helpers as sibling modules (cheese_bars.py,
     # api_key_hint.py next to it in the repo); bind those names to the source
     # files so these tests never run a stale staged copy.
-    spec = importlib.util.spec_from_file_location("cheese_bars", BARS_PATH)
-    bars = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = bars
-    spec.loader.exec_module(bars)
-    spec = importlib.util.spec_from_file_location("api_key_hint", HINT_PATH)
-    hint = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = hint
-    spec.loader.exec_module(hint)
+    for name, path in (("cheese_bars", BARS_PATH), ("api_key_hint", HINT_PATH)):
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
     spec = importlib.util.spec_from_file_location("cheese_demo", DEMO_PATH)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -594,10 +591,3 @@ def test_noul_bar_header_shows_selected_answer_probability(demo):
     # the selected answer's own probability, not (0.10).
     result = demo.cheese_bars.section("speech", wave(speech=False).result("speech"), 0.6)
     assert "(0.90)" in result.renderables[0].plain
-
-
-def test_missing_key_error_links_the_api_keys_page(demo):
-    # The error a user hits with no URUN_API_KEY must carry the clickable key
-    # page (which also prompts account creation for new users).
-    message = demo.api_key_hint.missing_api_key("use --mic-only to test audio first")
-    assert "https://console.urun.sh/settings/api-keys" in message

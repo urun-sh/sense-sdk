@@ -298,7 +298,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   const allowedHosts = new Set(hosts);
   const { cert, key } = generateCert();
   const page = readFileSync(join(import.meta.dir, "cheese_demo.html"));
-  console.log(`🧀 cheese demo (mode: ${app.apiKey ? "online" : `mic-only — set URUN_API_KEY to classify (make one at ${apiKeysUrl})`})`);
+  console.log(`🧀 cheese demo (mode: ${app.apiKey ? "online" : `mic-only — set URUN_API_KEY to continue (make one at ${apiKeysUrl})`})`);
   // The token rides the #fragment: browsers never send it in requests or Referer headers.
   for (const host of hosts.slice(1)) console.log(`  https://${host}/#${token}`);
   console.log("  accept the self-signed certificate warning; HTTPS is required for mic access");
