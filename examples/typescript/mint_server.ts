@@ -20,7 +20,10 @@
  * single-use, and expire in 10 minutes — mint per user session, or hand the
  * browser a minting endpoint it can call again before a redial.
  */
+import { missingApiKey } from "./api_key_hint";
+
 const apiKey = process.env.URUN_API_KEY ?? "";
+if (!apiKey) console.error(missingApiKey());
 
 const usage = `Sense browser quickstart — your browser page does:
 
@@ -39,7 +42,7 @@ Bun.serve({
     if (url.pathname !== "/client-secret" || req.method !== "POST") {
       return new Response(usage, { status: url.pathname === "/" ? 200 : 404 });
     }
-    if (!apiKey) return new Response("server misconfigured: set URUN_API_KEY", { status: 500 });
+    if (!apiKey) return new Response(`server misconfigured: ${missingApiKey()}`, { status: 500 });
     const up = await fetch("https://inference.urun.sh/v1/realtime/client_secrets", {
       method: "POST",
       headers: { authorization: `Bearer ${apiKey}` },

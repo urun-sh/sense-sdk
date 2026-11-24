@@ -21,13 +21,15 @@ def stage_examples(python_root: Path) -> None:
     shutil.rmtree(dest, ignore_errors=True)
     shutil.copytree(examples / "python", dest, ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copytree(examples / "assets", dest / "assets")
-    # The demo imports its bars helper as a sibling module; staged inside the
-    # package that helper is a submodule, so the import needs the relative form.
+    # The demo imports its sibling helpers as plain modules; staged inside
+    # the package those helpers are submodules, so the imports need the
+    # relative form.
     demo = dest / "cheese_demo.py"
     demo.write_text(
         "\n".join(
             line.replace("import cheese_bars", "from . import cheese_bars", 1)
-            if line.startswith("import cheese_bars")
+            .replace("import api_key_hint", "from . import api_key_hint", 1)
+            if line.startswith(("import cheese_bars", "import api_key_hint"))
             else line
             for line in demo.read_text(encoding="utf-8").splitlines()
         )

@@ -19,6 +19,7 @@ from array import array
 from pathlib import Path
 
 from sense import Context, ProtocolError, Sense, SenseUnavailable
+from sense.examples import api_key_hint  # the missing-key message, shared across the demos
 
 # -- questions ----------------------------------------------------------------
 
@@ -166,6 +167,9 @@ async def main():
         else str(Path(__file__).parent / "assets" / "mic-question-48k-mono.wav")
     )
     session = app.session()
+    if not session.api_key:
+        print(api_key_hint.missing_api_key(), file=sys.stderr)
+        return 1
     monitor = asyncio.create_task(barge_in_watch())
     start = time.monotonic()
     try:
