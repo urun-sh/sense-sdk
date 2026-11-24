@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { Sense, type Session, type Wave } from "@urun-sh/sense";
+import { apiKeysUrl } from "./api_key_hint";
 
 // -- Sense: define the questions, relay audio, read decisions -----------------
 
@@ -297,7 +298,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   const allowedHosts = new Set(hosts);
   const { cert, key } = generateCert();
   const page = readFileSync(join(import.meta.dir, "cheese_demo.html"));
-  console.log(`🧀 cheese demo (mode: ${app.apiKey ? "online" : "mic-only — set URUN_API_KEY to classify"})`);
+  console.log(`🧀 cheese demo (mode: ${app.apiKey ? "online" : `no API key — Sense needs URUN_API_KEY to connect (make one at ${apiKeysUrl})`})`);
   // The token rides the #fragment: browsers never send it in requests or Referer headers.
   for (const host of hosts.slice(1)) console.log(`  https://${host}/#${token}`);
   console.log("  accept the self-signed certificate warning; HTTPS is required for mic access");

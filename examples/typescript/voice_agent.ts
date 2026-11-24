@@ -13,6 +13,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Score, Sense, type Context, type Wave } from "@urun-sh/sense";
+import { missingApiKey } from "./api_key_hint";
 
 // -- questions ----------------------------------------------------------------
 
@@ -153,6 +154,10 @@ async function* audioFrames(path: string, chunkMs = 40): AsyncGenerator<Uint8Arr
 async function main(): Promise<number> {
   const path = process.argv[2] ?? fileURLToPath(new URL("./assets/mic-question-48k-mono.wav", import.meta.url));
   const session = app.session();
+  if (!app.apiKey) {
+    console.error(missingApiKey());
+    return 1;
+  }
   void bargeInWatch();
   // Demo bound: a live agent runs forever; the example stops after 30s.
   const done = Promise.withResolvers<void>();

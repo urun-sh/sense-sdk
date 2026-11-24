@@ -20,6 +20,7 @@ from array import array
 from collections import deque
 from contextlib import suppress
 
+import api_key_hint  # the missing-key message, shared across the demos
 import cheese_bars  # the probability bars (hidden by --no-chart)
 from rich.console import Group
 from rich.live import Live
@@ -149,7 +150,7 @@ async def main(args) -> int:
     mic = MicStream(display, args.device)
     session = app.session()
     if not args.mic_only and not session.api_key:
-        print("Set URUN_API_KEY, or use --mic-only to test audio first.", file=sys.stderr)
+        print(api_key_hint.missing_api_key("use --mic-only to test audio first"), file=sys.stderr)
         return 1
     await describe_microphone(args.device)
 
