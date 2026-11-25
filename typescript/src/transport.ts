@@ -153,7 +153,7 @@ type RtcCtor = new (config: { iceServers: never[] }) => RtcPeerConnection
 interface WsLike {
   send(data: string): void
   close(): void
-  addEventListener?(type: string, cb: () => void, opts?: { once?: boolean }): void
+  addEventListener?(type: string, cb: (ev: { data?: unknown; code?: number; reason?: string }) => void, opts?: { once?: boolean }): void
   on?(event: string, cb: (...args: never[]) => void): unknown
   once?(event: string, cb: (...args: never[]) => void): unknown
   off?(event: string, cb: (...args: never[]) => void): unknown
@@ -165,6 +165,9 @@ type WsCtor = new (
   url: string,
   options: { headers: Record<string, string>; maxPayload: number; followRedirects: false },
 ) => WsLike
+
+/** Browser `new WebSocket(url, protocols)`: no options object, no headers. */
+type BrowserWsCtor = new (url: string, protocols: string[]) => WsLike
 
 /** Node ships no WebTransport. When the global is missing on Node, load the
  * maintained ponyfill @fails-components/webtransport (WHATWG-shaped client
@@ -358,11 +361,16 @@ export class WsWire implements Wire {
   private closeCb: ((code?: number, reason?: string) => void) | null = null
 
   constructor(private ws: WsLike) {
-    ws.on?.('message', (data: unknown) => this.messageCb?.(String(data)))
-    ws.on?.('close', (code: number, reason: unknown) => this.closeCb?.(code, closeReason(reason)))
-    // EventEmitter: an unhandled 'error' throws (crashes the host process);
-    // 'close' follows and reports the death through closeCb.
-    ws.on?.('error', () => undefined)
+    if (typeof ws.on === 'function') {
+      ws.on('message', (data: unknown) => this.messageCb?.(String(data)))
+      ws.on('close', (code: number, reason: unknown) => this.closeCb?.(code, closeReason(reason)))
+      // EventEmitter: an unhandled 'error' throws (crashes the host process);
+      // 'close' follows and reports the death through closeCb.
+      ws.on('error', () => undefined)
+    } else {
+      ws.addEventListener?.('message', (ev) => this.messageCb?.(String(ev.data)))
+      ws.addEventListener?.('close', (ev) => this.closeCb?.(ev.code, closeReason(ev.reason)))
+    }
   }
 
   sendJson(obj: unknown): void {
@@ -379,26 +387,23 @@ export class WsWire implements Wire {
 
   close(): Promise<void> {
     const { promise, resolve } = Promise.withResolvers<void>()
-    this.ws.once?.('close', () => resolve())
+    if (typeof this.ws.once === 'function') this.ws.once('close', () => resolve())
+    else this.ws.addEventListener?.('close', () => resolve(), { once: true })
     this.ws.close()
     return promise
   }
 }
 
-/** Dial the WS wire. Node uses the `ws` package (Authorization header
- * support); a browser global WebSocket cannot set headers, so browser WS
- * fallback is only viable where the proxy accepts URL-carried auth.
+/** Dial the WS wire. Node uses the `ws` package (Authorization header).
+ * A browser WebSocket cannot set headers, so it carries the client secret
+ * in the `openai-insecure-api-key.<secret>` subprotocol (the hub's browser
+ * auth door); `realtime` is offered too, but its echo is not required.
  *
  * Dynamic import: `ws` is a Node-only package — a static import would break
  * every browser bundle of this SDK (the platform-specific-module exception). */
 export const dialWs: WireDialer = async (opts) => {
-  const Impl = await webSocketImpl()
+  const ws = await newWebSocket(opts)
   const { promise, resolve, reject } = Promise.withResolvers<WsWire>()
-  const ws = new Impl(opts.wsUrl, {
-    headers: { Authorization: `Bearer ${opts.apiKey}` },
-    maxPayload: MAX_INBOUND_MESSAGE_BYTES,
-    followRedirects: false,
-  })
   const fail = (err: unknown) => {
     ws.removeAllListeners?.()
     // Keep a no-op 'error' listener: some runtimes (Bun's ws) emit 'error'
@@ -418,6 +423,10 @@ export const dialWs: WireDialer = async (opts) => {
     )
   })
   ws.once?.('error', fail)
+  if (typeof ws.once !== 'function') {
+    // Browser: a refused handshake surfaces only as an opaque 'error' event.
+    ws.addEventListener?.('error', () => fail(new TransportDialError('WebSocket dial failed')), { once: true })
+  }
   const onOpen = () => {
     ws.off?.('error', fail)
     resolve(new WsWire(ws))
@@ -427,20 +436,23 @@ export const dialWs: WireDialer = async (opts) => {
   return promise
 }
 
-async function webSocketImpl(): Promise<WsCtor> {
+async function newWebSocket(opts: WireOptions): Promise<WsLike> {
   // Cross-runtime Node probe: globalThis.process is untyped (no node lib here).
   const env = globalThis as typeof globalThis & { process?: { versions?: { node?: string } } }
-  const isNode = typeof env.process?.versions?.node === 'string'
-  if (isNode) {
+  if (typeof env.process?.versions?.node === 'string') {
     const { default: WS } = await import('ws')
-    return WS as unknown as WsCtor // `ws`'s typed ctor accepts the structural WsLike surface
+    const Impl = WS as unknown as WsCtor // `ws`'s typed ctor accepts the structural WsLike surface
+    return new Impl(opts.wsUrl, {
+      headers: { Authorization: `Bearer ${opts.apiKey}` },
+      maxPayload: MAX_INBOUND_MESSAGE_BYTES,
+      followRedirects: false,
+    })
   }
-  const ctor = globalCtor('WebSocket') as WsCtor | undefined
-  if (ctor === undefined) throw new TransportDialError('no WebSocket implementation on this platform')
-  // Browser WebSocket cannot set the Authorization header ({headers} becomes
-  // the protocols arg → SyntaxError) and has no EventEmitter surface — dialWs
-  // needs both. Fail clearly instead of a fallback that can never work.
-  throw new TransportDialError('browser WebSocket fallback is unsupported (no header auth)')
+  // Never dial a browser WebSocket without a secret: it would go out unauthenticated.
+  if (opts.apiKey.trim() === '') throw new TransportDialError('browser WebSocket needs a client secret (no header auth)')
+  const Impl = globalCtor('WebSocket') as BrowserWsCtor | undefined
+  if (Impl === undefined) throw new TransportDialError('no WebSocket implementation on this platform')
+  return new Impl(opts.wsUrl, ['realtime', `openai-insecure-api-key.${opts.apiKey}`])
 }
 
 // ---------------------------------------------------------------------------
