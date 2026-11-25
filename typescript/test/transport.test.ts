@@ -7,6 +7,7 @@ import {
   QuicWire,
   RtcWire,
   TransportDialError,
+  MAX_INBOUND_MESSAGE_BYTES,
   connectWire,
   dialWs,
   hashToBytes,
@@ -257,7 +258,10 @@ describe("dialWs", () => {
     wire.onMessage((raw) => got.push(raw));
     made[0]?.ws.emit("message", { data: '{"type":"x"}' });
     expect(got).toEqual(['{"type":"x"}']);
-    await wire.close();
+    // no maxPayload in a browser: an oversized message closes the wire undelivered
+    made[0]?.ws.emit("message", { data: "x".repeat(MAX_INBOUND_MESSAGE_BYTES + 1) });
+    expect(got).toEqual(['{"type":"x"}']);
+    await wire.close(); // already closed: settles instead of waiting for a second 'close'
   });
 
   test("browser refuses to dial without a client secret", async () => {

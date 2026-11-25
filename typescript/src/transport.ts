@@ -359,17 +359,33 @@ export class WsWire implements Wire {
   readonly kind: Transport = 'ws'
   private messageCb: ((raw: string) => void) | null = null
   private closeCb: ((code?: number, reason?: string) => void) | null = null
+  private closed = false
 
   constructor(private ws: WsLike) {
     if (typeof ws.on === 'function') {
       ws.on('message', (data: unknown) => this.messageCb?.(String(data)))
-      ws.on('close', (code: number, reason: unknown) => this.closeCb?.(code, closeReason(reason)))
+      ws.on('close', (code: number, reason: unknown) => {
+        this.closed = true
+        this.closeCb?.(code, closeReason(reason))
+      })
       // EventEmitter: an unhandled 'error' throws (crashes the host process);
       // 'close' follows and reports the death through closeCb.
       ws.on('error', () => undefined)
     } else {
-      ws.addEventListener?.('message', (ev) => this.messageCb?.(String(ev.data)))
-      ws.addEventListener?.('close', (ev) => this.closeCb?.(ev.code, closeReason(ev.reason)))
+      ws.addEventListener?.('message', (ev) => {
+        const data = String(ev.data)
+        // Browser sockets have no maxPayload: same bound as the Node leg, enforced here.
+        if (utf8Exceeds(data, MAX_INBOUND_MESSAGE_BYTES)) {
+          console.error(`[sense] ws message exceeds ${MAX_INBOUND_MESSAGE_BYTES} bytes; closing the wire`)
+          void this.close()
+          return
+        }
+        this.messageCb?.(data)
+      })
+      ws.addEventListener?.('close', (ev) => {
+        this.closed = true
+        this.closeCb?.(ev.code, closeReason(ev.reason))
+      })
     }
   }
 
@@ -386,6 +402,7 @@ export class WsWire implements Wire {
   }
 
   close(): Promise<void> {
+    if (this.closed) return Promise.resolve() // a closed socket never fires 'close' again
     const { promise, resolve } = Promise.withResolvers<void>()
     if (typeof this.ws.once === 'function') this.ws.once('close', () => resolve())
     else this.ws.addEventListener?.('close', () => resolve(), { once: true })
