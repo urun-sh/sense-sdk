@@ -1,6 +1,6 @@
 {
   "name": "@urun-sh/sense",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "TypeScript SDK for the Sense realtime question stream",
   "license": "Apache-2.0",
   "author": "Urun Platform, Inc",
