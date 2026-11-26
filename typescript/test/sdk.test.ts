@@ -994,7 +994,7 @@ describe("explicit presence", () => {
       expect(presenceFrames(wires[0]!)).toEqual([{ type: "session.presence" }]);
       vi.advanceTimersByTime(20_000);
       expect(presenceFrames(wires[0]!)).toHaveLength(3);
-      // An app-level send re-asserts presence (refreshes the activity window).
+      // App traffic does not add or pause keepalives: the cadence is fixed.
       s.emitText("still here", "append");
       vi.advanceTimersByTime(30_000);
       expect(presenceFrames(wires[0]!)).toHaveLength(6);
@@ -1004,20 +1004,19 @@ describe("explicit presence", () => {
     }
   });
 
-  test("idle past 60s lapses presence; keepalive() re-asserts it", async () => {
+  test("an idle open connection keeps the cadence past the old 60s window", async () => {
+    // Regression (prod hub lane 2026-11-23): a quiet client's member leg was
+    // released at ~45 s because the old 60 s activity window stopped the
+    // cadence — the lane went silent with the socket still open. Every hop
+    // that drops a quiet leg (celld: 15 s ping + 30 s pong deadline; the
+    // member's SFU attach read deadline: 45 s) keys on client frames.
     const wires: FakeWire[] = [];
     const s = new Session({ apiKey: "k", questions: QUESTIONS, wireFactory: recordingFactory([], wires) });
     vi.useFakeTimers();
     try {
       await s.connect();
-      vi.advanceTimersByTime(60_000);
-      const active = presenceFrames(wires[0]!).length;
-      expect(active).toBe(5); // ticks at 10..50s; at exactly 60s the window has lapsed (< is strict)
-      vi.advanceTimersByTime(30_000); // idle past the 60s window: no frames
-      expect(presenceFrames(wires[0]!)).toHaveLength(active);
-      s.keepalive(); // explicit re-assert
-      vi.advanceTimersByTime(10_000);
-      expect(presenceFrames(wires[0]!)).toHaveLength(active + 1);
+      vi.advanceTimersByTime(120_000); // no app activity at all
+      expect(presenceFrames(wires[0]!)).toHaveLength(12); // every 10 s, for the socket's life
       await s.close();
     } finally {
       vi.useRealTimers();
@@ -1173,34 +1172,43 @@ describe("session drive (attach starts the session)", () => {
   });
 });
 
-describe("unknown_event keepalive muting", () => {
+describe("unknown_event on a keepalive type", () => {
   const PRESENCE_REJECTED = {
     type: "error",
     error: { code: "unknown_event", message: "event type session.presence is not supported by this adapter" },
   };
+  const presenceCount = (w: FakeWire): number =>
+    w.sent.filter((m) => hasType(m) && m.type === "session.presence").length;
 
-  test("a presence rejection mutes the type: not counted, never sent again; other errors stay loud", async () => {
+  test("a presence rejection is benign and must NOT silence the cadence", async () => {
     const wires: FakeWire[] = [];
     const s = new Session({ apiKey: "sk-test", wireFactory: recordingFactory([], wires) });
-    await s.connect();
-    await drain();
-    const w = wires[0]!;
-    const before = s.stats.errors;
+    vi.useFakeTimers();
+    try {
+      await s.connect();
+      const w = wires[0]!;
+      const before = s.stats.errors;
 
-    w.emit(PRESENCE_REJECTED);
-    expect(s.stats.errors).toBe(before); // expected on adapters that don't speak it
+      w.emit(PRESENCE_REJECTED);
+      expect(s.stats.errors).toBe(before); // expected on adapters that don't speak it
 
-    // The muted type is never sent again on this connection.
-    (s as unknown as { presenceTick(): void }).presenceTick();
-    expect(w.sent.some((m) => hasType(m) && m.type === "session.presence")).toBe(false);
+      // Regression (prod hub lane 2026-11-23): muting the rejected type made
+      // the lane silent and the member leg was released at ~45 s. The cadence
+      // must keep feeding the wire; a stray error event is the cheaper cost.
+      const sent = presenceCount(w);
+      vi.advanceTimersByTime(20_000);
+      expect(presenceCount(w)).toBeGreaterThan(sent);
 
-    // Any other error stays loud and counted.
-    w.emit({ type: "error", error: { code: "weird", message: "boom" } });
-    expect(s.stats.errors).toBe(before + 1);
-    await s.close();
+      // Any other error stays loud and counted.
+      w.emit({ type: "error", error: { code: "weird", message: "boom" } });
+      expect(s.stats.errors).toBe(before + 1);
+      await s.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  test("the mute resets on the next dial: a new connection sends presence again", async () => {
+  test("a redial resumes the cadence on the new wire", async () => {
     const wires: FakeWire[] = [];
     const second = Promise.withResolvers<FakeWire>();
     const factory: WireDialer = () => {
@@ -1210,19 +1218,19 @@ describe("unknown_event keepalive muting", () => {
       return Promise.resolve(w as never);
     };
     const s = new Session({ apiKey: "sk-test", wireFactory: factory });
-    await s.connect();
-    await drain();
-    wires[0]!.emit(PRESENCE_REJECTED);
-    (s as unknown as { presenceTick(): void }).presenceTick();
-    expect(wires[0]!.sent.some((m) => hasType(m) && m.type === "session.presence")).toBe(false);
-
-    // session_gone redials immediately; the new connection clears the mute.
-    wires[0]!.drop(1011, "session_gone");
-    const w2 = await second.promise;
-    await drain();
-    (s as unknown as { presenceTick(): void }).presenceTick();
-    expect(w2.sent.some((m) => hasType(m) && m.type === "session.presence")).toBe(true);
-    await s.close();
+    vi.useFakeTimers();
+    try {
+      await s.connect();
+      wires[0]!.emit(PRESENCE_REJECTED);
+      wires[0]!.drop(1011, "session_gone"); // redials immediately
+      const w2 = await second.promise;
+      await drain();
+      vi.advanceTimersByTime(10_000);
+      expect(presenceCount(w2)).toBeGreaterThan(0);
+      await s.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

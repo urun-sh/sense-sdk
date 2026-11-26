@@ -95,20 +95,21 @@ MAX_PENDING_AUDIO_CHUNKS = 1500
 #: Text items held for the next send; the oldest is dropped beyond this.
 MAX_PENDING_TEXT_ITEMS = 256
 
-#: Explicit presence (owner GO 2026-11-16, hub-primary): the proxy holds a
-#: pooled seat only while the client says it is present. The signal is the
-#: ``{"type": "session.presence"}`` frame on the realtime lane, sent every
-#: ``PRESENCE_CADENCE_S`` while ``monotonic() - _last_activity`` is inside the
-#: idle window; an idle lapse stops the frames (an explicit detach — the
-#: runtime's #3439 governor then PARKS the seat, it never dies), and the next
-#: app-level send re-asserts it. A visible browser tab is NOT activity (owner
-#: ruling): only real app sends and ``keepalive()`` count.
-PRESENCE_IDLE_S = 60.0
+#: Keepalive cadence on an open realtime connection. An idle client must never
+#: go quiet: celld (the edge) closes a socket whose peer sends nothing inbound
+#: for 45 s (a WS protocol ping every 15 s, a 30 s pong deadline), the hub
+#: relay's liveness keys on inbound client frames, and the member's SFU attach
+#: closes its leg after 45 s without one. Pongs cover the edge only — they are
+#: transport frames discarded below the relay and the attach — and a stalled or
+#: suspended client event loop answers no pongs at all. So the session sends
+#: ONE application-level frame, ``{"type": "session.presence"}``, every
+#: ``PRESENCE_CADENCE_S`` for the life of the connection: an ordinary event on
+#: every transport (see _transport.py), counted as activity by every hop.
 PRESENCE_CADENCE_S = 10.0
 
-#: Keepalive event types the SDK itself sends on the realtime lane. An
-#: adapter that rejects one with ``unknown_event`` gets it muted for the
-#: rest of that connection (liveness still comes from audio frames).
+#: Keepalive event types the SDK itself sends on the realtime lane. An adapter
+#: that does not speak one answers ``unknown_event`` — benign, and it does NOT
+#: silence the cadence (a quiet lane is dropped; a stray error event is not).
 _KEEPALIVE_EVENTS = frozenset({"session.presence", "ping"})
 
 # The five OpenAI Realtime turn terminals (see _handle_wire_event for why each
@@ -275,9 +276,10 @@ class Session:
         #: per session so a reconnect re-binds to the same member ("first
         #: caller binds" — the edge's own contract).
         self._dcid = uuid.uuid4().hex
-        #: Keepalive event types the current adapter has rejected with
-        #: ``unknown_event`` (per connection; reset on every dial).
-        self._muted_keepalive: set[str] = set()
+        #: Keepalive event types the current adapter has already answered with
+        #: ``unknown_event`` (per connection; reset on every dial). Only the
+        #: log is deduped — the cadence keeps sending.
+        self._keepalive_reported: set[str] = set()
         #: Young-death ladder: monotonic time the current wire went live,
         #: consecutive young deaths, and the next redial delay.
         self._connected_at: float | None = None
@@ -286,9 +288,6 @@ class Session:
         self._audio_in = _AudioInput(self)
         self._video_in = _VideoInput(self)
         self._text_in = _TextInput(self)
-        #: Last app-level send (audio/video/text push, barge-in, keepalive).
-        #: A freshly created session is present until this lapses.
-        self._last_activity = time.monotonic()
 
     # -- registration ------------------------------------------------------
 
@@ -406,7 +405,6 @@ class Session:
     # -- outbound queues -----------------------------------------------------
 
     def _enqueue_audio(self, source: str, b64: str) -> None:
-        self._last_activity = time.monotonic()
         queue = self._audio.get(source)
         if queue is None:
             queue = self._audio[source] = deque(maxlen=MAX_PENDING_AUDIO_CHUNKS)
@@ -416,12 +414,10 @@ class Session:
         self._wake_up()
 
     def _enqueue_video(self, b64: str) -> None:
-        self._last_activity = time.monotonic()
         self._video.append(b64)
         self._wake_up()
 
     def _enqueue_text(self, text: str) -> None:
-        self._last_activity = time.monotonic()
         self._text_out.append(text)
         self._wake_up()
 
@@ -830,7 +826,6 @@ class Session:
         wire, loop = self._wire, self._loop
         if wire is None or wire.closed or loop is None or not loop.is_running():
             return
-        self._last_activity = time.monotonic()
         loop.create_task(self._send(wire, {"type": "response.cancel"}))
 
     # -- wave assembly --------------------------------------------------------
@@ -958,7 +953,7 @@ class Session:
         wire = await self._connect()
         self._wire = wire
         self._connected_at = time.monotonic()
-        self._muted_keepalive.clear()  # new connection: the adapter may speak them now
+        self._keepalive_reported.clear()  # new connection: report a rejection once again
         self._wake_up()  # the sender may hold queued audio
         try:
             await self._hello(wire)
@@ -1110,20 +1105,23 @@ class Session:
         if code == "session_gone":
             raise _LaneDead("session_gone")
         if code == "unknown_event":
-            # An adapter that doesn't speak our keepalive events rejects each
-            # one once and only once matters: the first rejection mutes that
-            # event type for the rest of the connection. Benign — liveness
-            # still comes from audio frames — so: debug log, no stats.errors,
-            # no turn reopen, and the muted type is never sent again.
+            # An adapter that does not speak our keepalive events answers each
+            # one with ``unknown_event``. Benign, and it must NOT silence the
+            # cadence: a lane with nothing inbound is closed at ~45 s by the
+            # edge, the relay and the member attach (see PRESENCE_CADENCE_S).
+            # A stray error event costs nothing; a quiet lane costs the member.
+            # Debug-log the first rejection per type per connection only.
             message = err.get("message") if isinstance(err, dict) else ""
             match = _UNKNOWN_EVENT_RE.search(str(message))
             event = match.group(1) if match is not None else None
             if event is not None and event in _KEEPALIVE_EVENTS:
-                self._muted_keepalive.add(event)
-                log.debug(
-                    "[sense] adapter does not support keepalive event %s; muted for this connection",
-                    event,
-                )
+                if event not in self._keepalive_reported:
+                    self._keepalive_reported.add(event)
+                    log.debug(
+                        "[sense] adapter does not support keepalive event %s; "
+                        "the keepalive cadence continues regardless",
+                        event,
+                    )
                 return
         if code == "response_in_progress":
             # A cancelled cadence turn the server never settles bricks the
@@ -1151,21 +1149,21 @@ class Session:
         self.stats.decisions += 1
 
     def keepalive(self) -> None:
-        """App-level presence assertion: refreshes the activity window without
-        a media payload. Call this when the app is alive but sending nothing."""
-        self._last_activity = time.monotonic()
+        """No-op, kept for API compatibility. The session now keeps the
+        connection alive by itself: it sends ``{"type": "session.presence"}``
+        every ``PRESENCE_CADENCE_S`` for as long as the wire is open, so an app
+        that is alive but sending nothing needs no call."""
+        return None
 
     async def _presence_loop(self) -> None:
-        """Send ``{"type": "session.presence"}`` every cadence while the app is
-        active (inside the idle window); the idle lapse stops the frames."""
+        """Send ``{"type": "session.presence"}`` every cadence for the life of
+        the connection. This is the SDK's keepalive: every hop that can drop a
+        quiet leg resets on an application-level inbound frame (see
+        PRESENCE_CADENCE_S), and a rejected type never silences it — going
+        quiet is what loses the member."""
         while not self._closed:
             wire = self._wire
-            if (
-                wire is not None
-                and not wire.closed
-                and "session.presence" not in self._muted_keepalive
-                and time.monotonic() - self._last_activity < PRESENCE_IDLE_S
-            ):
+            if wire is not None and not wire.closed:
                 try:
                     await self._send(wire, {"type": "session.presence"})
                 except Exception:
