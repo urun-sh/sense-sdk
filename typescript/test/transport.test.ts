@@ -7,7 +7,9 @@ import {
   QuicWire,
   RtcWire,
   TransportDialError,
+  MAX_INBOUND_MESSAGE_BYTES,
   connectWire,
+  dialWs,
   hashToBytes,
   transportOrder,
 } from "../src/transport.ts";
@@ -92,12 +94,12 @@ const baseOpts: WireOptions = {
 // selection / fallback
 // ---------------------------------------------------------------------------
 
-type Ctors = { WebTransport?: unknown; RTCPeerConnection?: unknown };
+type Ctors = { WebTransport?: unknown; RTCPeerConnection?: unknown; WebSocket?: unknown };
 
 /** Set global constructors for the duration of `fn`, restoring exactly what
  * was there before (used / undefined) afterwards. */
 async function withCtors<T>(ctors: Ctors, fn: () => Promise<T> | T): Promise<T> {
-  const g = globalThis as typeof globalThis & Record<keyof Ctors, unknown>;
+  const g = globalThis as unknown as Record<keyof Ctors, unknown>;
   const saved: Record<string, { used: boolean; value: unknown }> = {};
   for (const name of Object.keys(ctors) as Array<keyof Ctors>) {
     saved[name] = name in g ? { used: true, value: g[name] } : { used: false, value: undefined };
@@ -210,6 +212,89 @@ describe("connectWire", () => {
     );
     expect(err).toBeInstanceOf(TransportDialError);
     expect(dialed).toEqual(["quic"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WebSocket dial shape (browser subprotocol auth vs Node header auth)
+// ---------------------------------------------------------------------------
+
+/** Run `fn` as a browser: no `process` global, `WebSocket` = `ctor`. */
+async function asBrowser<T>(ctor: unknown, fn: () => Promise<T>): Promise<T> {
+  const g = globalThis as typeof globalThis & Record<string, unknown>;
+  const savedProcess = Object.getOwnPropertyDescriptor(g, "process");
+  Object.defineProperty(g, "process", { value: undefined, configurable: true, writable: true });
+  try {
+    return await withCtors({ WebSocket: ctor }, fn);
+  } finally {
+    if (savedProcess) Object.defineProperty(g, "process", savedProcess);
+  }
+}
+
+describe("dialWs", () => {
+  test("browser dials with the client secret as a subprotocol and no options object", async () => {
+    const made: Array<{ args: unknown[]; ws: FakeBrowserWs }> = [];
+    class FakeBrowserWs {
+      private listeners: Record<string, Array<(ev: unknown) => void>> = {};
+      constructor(...args: unknown[]) {
+        made.push({ args, ws: this });
+      }
+      addEventListener(type: string, cb: (ev: unknown) => void) {
+        (this.listeners[type] ??= []).push(cb);
+        if (type === "open") queueMicrotask(() => cb({})); // handshake succeeds once someone listens
+      }
+      emit(type: string, ev: unknown) {
+        for (const cb of this.listeners[type] ?? []) cb(ev);
+      }
+      send() {}
+      close() {
+        this.emit("close", { code: 1000, reason: "" });
+      }
+    }
+    const wire = await asBrowser(FakeBrowserWs, () => dialWs({ ...baseOpts, transport: "ws" }));
+    expect(made.map((m) => m.args)).toEqual([[baseOpts.wsUrl, ["realtime", `openai-insecure-api-key.${baseOpts.apiKey}`]]]);
+    // browser event surface: messages and close reach the wire
+    const got: string[] = [];
+    wire.onMessage((raw) => got.push(raw));
+    made[0]?.ws.emit("message", { data: '{"type":"x"}' });
+    expect(got).toEqual(['{"type":"x"}']);
+    // no maxPayload in a browser: an oversized message closes the wire undelivered
+    made[0]?.ws.emit("message", { data: "x".repeat(MAX_INBOUND_MESSAGE_BYTES + 1) });
+    expect(got).toEqual(['{"type":"x"}']);
+    await wire.close(); // already closed: settles instead of waiting for a second 'close'
+  });
+
+  test("browser refuses to dial without a client secret", async () => {
+    let constructed = false;
+    const ctor = function FakeBrowserWs() {
+      constructed = true;
+    };
+    const err = await asBrowser(ctor, () => dialWs({ ...baseOpts, transport: "ws", apiKey: "  " })).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(TransportDialError);
+    expect(err instanceof Error && err.message).toBe("browser WebSocket needs a client secret (no header auth)");
+    expect(constructed).toBe(false);
+  });
+
+  test("Node dials with the ws package: Authorization header, no subprotocols", async () => {
+    const seen: Array<{ auth: string | null; proto: string | null }> = [];
+    const server = Bun.serve({
+      port: 0,
+      fetch(req, srv) {
+        seen.push({ auth: req.headers.get("authorization"), proto: req.headers.get("sec-websocket-protocol") });
+        return srv.upgrade(req) ? undefined : new Response("no", { status: 400 });
+      },
+      websocket: { message() {} },
+    });
+    try {
+      const wire = await dialWs({ ...baseOpts, transport: "ws", wsUrl: `ws://127.0.0.1:${server.port}/v1/realtime` });
+      expect(seen).toEqual([{ auth: `Bearer ${baseOpts.apiKey}`, proto: null }]);
+      await wire.close();
+    } finally {
+      server.stop(true);
+    }
   });
 });
 
